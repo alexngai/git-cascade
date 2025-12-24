@@ -1,0 +1,50 @@
+{
+  "name": "dataplane",
+  "version": "0.1.0",
+  "description": "Data plane SDK",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "dataplane": "./dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "prepublishOnly": "npm run build",
+    "publish:npm": "npm publish --access public",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alexngai/dataplane.git"
+  },
+  "keywords": [
+    "data",
+    "dataplane",
+    "sdk"
+  ],
+  "author": "Alex Ngai",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/alexngai/dataplane/issues"
+  },
+  "homepage": "https://github.com/alexngai/dataplane#readme",
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
