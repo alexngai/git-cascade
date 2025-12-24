@@ -68,8 +68,8 @@ Standard git workflows assume human-speed interactions with sequential operation
                 ┌───────────────┼───────────────┐
                 ▼               ▼               ▼
         ┌─────────────┐ ┌─────────────┐ ┌─────────────┐
-        │   TinyDB    │ │     Git     │ │  Worktrees  │
-        │  (metadata) │ │   (data)    │ │ (isolation) │
+        │  TinyBase   │ │     Git     │ │  Worktrees  │
+        │ (SQLite WAL)│ │ (or jj opt.)│ │ (isolation) │
         └─────────────┘ └─────────────┘ └─────────────┘
 ```
 
@@ -127,6 +127,7 @@ class Stream:
     created_at: float            # Unix timestamp
     updated_at: float            # Unix timestamp
     merged_into: Optional[str]   # Target stream if merged
+    enable_stacked_review: bool  # Opt-in: track commits as reviewable stack entries
     metadata: dict               # Extensible metadata
 ```
 
@@ -197,17 +198,25 @@ def create_stream(
     name: str,
     agent_id: str,
     base: str = "main",
-    parent_stream: Optional[str] = None
+    parent_stream: Optional[str] = None,
+    enable_stacked_review: bool = False  # Opt-in for review workflow
 ) -> str:
     """
     Create a new work stream.
-    
+
     1. Resolve base to commit hash
     2. Generate stream ID
     3. Create git branch stream/{id} at base
     4. Record stream in database
     5. Record initial operation
-    
+
+    Args:
+        name: Human-readable name for the stream
+        agent_id: ID of the owning agent
+        base: Branch or commit to base from (default: main)
+        parent_stream: Optional parent stream ID if forking
+        enable_stacked_review: If True, track commits as reviewable stack entries
+
     Returns: stream_id
     """
 ```
@@ -485,25 +494,26 @@ def find_common_ancestor(stream_a: str, stream_b: str) -> str:
 - Complexity: Must track worktree-to-agent mapping
 - Git limitations: Can't checkout same branch in multiple worktrees
 
-### 5.2 Why TinyDB (Not SQLite or In-Memory)
+### 5.2 Why TinyBase + SQLite WAL
 
-**Decision**: Use TinyDB for metadata storage.
+**Decision**: Use TinyBase with SQLite in WAL mode for metadata storage.
 
 **Rationale**:
-- Zero dependencies (pure Python)
-- Human-readable JSON storage (easy debugging)
-- Simple API, no ORM needed
-- Sufficient for expected scale (hundreds of streams, thousands of operations)
+- SQLite WAL mode provides concurrent read/write access
+- Multiple agents can safely write to different streams simultaneously
+- TinyBase provides a clean Python interface with minimal boilerplate
+- Sufficient for expected scale (10+ concurrent agents, thousands of operations)
+- Single-file database simplifies deployment and backup
 
 **Trade-offs**:
-- Not concurrent-safe for writes (addressed in section 6)
-- No complex queries (must load and filter in Python)
-- Slower than SQLite for large datasets
+- Slightly more complex than pure JSON storage
+- Requires SQLite (ubiquitous, but still a dependency)
+- Binary format less human-readable than JSON (mitigated by query tools)
 
-**Alternative considered**: SQLite with WAL mode
-- Better concurrency
-- More complexity
-- Overkill for expected scale
+**Why not TinyDB**:
+- TinyDB rewrites entire JSON file on each write
+- Not safe for concurrent writes from multiple agents
+- Would require file locking or single-writer pattern
 
 ### 5.3 Why Streams (Not Just Branches)
 
@@ -550,63 +560,141 @@ def find_common_ancestor(stream_a: str, stream_b: str) -> str:
 - Review status must be re-mapped (by original_commit field)
 - Position might change if commits squashed/split
 
+### 5.6 jj-Compatible Interface Design
+
+**Decision**: Design interfaces around jj concepts even with git backend.
+
+**Rationale**:
+- jj may be adopted as backend in the future
+- jj's concepts (changes, operations) are cleaner abstractions
+- Makes swap easier without breaking client code
+- Keeps package lightweight now, extensible later
+
+**Key jj concepts we adopt**:
+
+| jj Concept | Our Implementation (git backend) | Future (jj backend) |
+|------------|----------------------------------|---------------------|
+| Change | Change-Id in commit trailer + tracking table | Native change ID |
+| Operation | Operation log in SQLite | Native operation log |
+| Conflict | Deferred conflict records | First-class conflicts |
+| Working copy | Git worktree | jj working copy |
+
+**Interface abstraction**:
+
+```python
+class VCSBackend(Protocol):
+    """
+    Abstract interface for version control operations.
+    Implemented by GitBackend (now) and JJBackend (future).
+    """
+
+    def create_change(self, description: str) -> ChangeId:
+        """Create a new change (maps to commit in git, change in jj)."""
+        ...
+
+    def describe_change(self, change_id: ChangeId, description: str) -> None:
+        """Update change description."""
+        ...
+
+    def get_change(self, change_id: ChangeId) -> Change:
+        """Get change by stable ID."""
+        ...
+
+    def rebase_change(self, change_id: ChangeId, onto: ChangeId) -> RebaseResult:
+        """Rebase a change onto another."""
+        ...
+
+    def get_conflicts(self, change_id: ChangeId) -> list[Conflict]:
+        """Get conflicts in a change (empty for git unless using deferral mode)."""
+        ...
+```
+
+**What we defer to jj backend**:
+- Lock-free concurrent mutations
+- First-class conflict storage
+- Automatic operation undo
+- Anonymous branches
+
 ---
 
 ## 6. Concurrency Model
 
-### 6.1 Current Approach: Cooperative Single-Writer
+### 6.1 Approach: SQLite WAL + Stream-Level Coordination
 
-The initial design assumes:
-- One agent writes to a stream at a time
-- Multiple agents can read concurrently
-- Coordinator ensures write serialization
+The design leverages SQLite WAL mode for database-level concurrency, with stream-level coordination enforced by the external coordinator:
+
+- **Database writes**: SQLite WAL allows concurrent writes from multiple agents
+- **Stream ownership**: One agent writes to a stream at a time (coordinator-enforced)
+- **Cross-stream operations**: Multiple agents can work on different streams simultaneously
 
 ```python
 class StreamLock:
-    """Simple cooperative locking"""
-    
-    def __init__(self, db: TinyDB):
-        self.locks = db.table('locks')
-    
+    """
+    Stream-level locking for operations that require exclusive access.
+
+    SQLite WAL handles database concurrency. This lock ensures logical
+    consistency for multi-step git operations on a single stream.
+    """
+
+    def __init__(self, db: Database):
+        # Using TinyBase/SQLite - concurrent-safe
+        self.locks = db.table('stream_locks')
+
     def acquire(self, stream_id: str, agent_id: str, timeout: float = 30) -> bool:
-        Q = Query()
-        existing = self.locks.get(Q.stream_id == stream_id)
-        
-        if existing:
-            if time.time() - existing['acquired_at'] > timeout:
-                # Lock expired, steal it
-                self.locks.update(
-                    {'agent_id': agent_id, 'acquired_at': time.time()},
-                    Q.stream_id == stream_id
-                )
-                return True
-            return False  # Lock held by another agent
-        
-        self.locks.insert({
-            'stream_id': stream_id,
-            'agent_id': agent_id,
-            'acquired_at': time.time()
-        })
-        return True
-    
+        """
+        Acquire exclusive lock on a stream.
+
+        Uses SQLite's atomic operations - no race conditions.
+        """
+        now = time.time()
+
+        with self.db.transaction():
+            existing = self.locks.get(stream_id=stream_id)
+
+            if existing:
+                if existing.agent_id == agent_id:
+                    # Already own it, refresh
+                    self.locks.update(stream_id=stream_id, acquired_at=now)
+                    return True
+                if now - existing.acquired_at > timeout:
+                    # Lock expired, take over
+                    self.locks.update(
+                        stream_id=stream_id,
+                        agent_id=agent_id,
+                        acquired_at=now
+                    )
+                    return True
+                return False  # Lock held by another agent
+
+            self.locks.insert(
+                stream_id=stream_id,
+                agent_id=agent_id,
+                acquired_at=now
+            )
+            return True
+
     def release(self, stream_id: str, agent_id: str) -> None:
-        Q = Query()
-        self.locks.remove((Q.stream_id == stream_id) & (Q.agent_id == agent_id))
+        self.locks.delete(stream_id=stream_id, agent_id=agent_id)
 ```
 
-### 6.2 Limitations
+### 6.2 Concurrency Guarantees
 
-- TinyDB itself is not concurrent-safe for writes
-- If coordinator crashes while holding lock, must wait for timeout
-- No deadlock detection for cross-stream operations
+| Layer | Mechanism | Guarantees |
+|-------|-----------|------------|
+| Database | SQLite WAL | Concurrent reads/writes, ACID transactions |
+| Stream | StreamLock | One writer per stream, timeout-based recovery |
+| Coordinator | External | Agent-to-stream assignment, handoff management |
 
-### 6.3 Future Options
+### 6.3 What the Coordinator Must Ensure
 
-If concurrency becomes a problem:
+The external coordinator is responsible for:
 
-1. **SQLite with WAL mode**: Better write concurrency, still simple
-2. **File-based locking per stream**: `.git/stream-locks/{stream_id}.lock`
-3. **Adopt jj**: Get proper lock-free operations
+1. Assigning streams to agents (one active writer per stream)
+2. Managing handoffs when work transfers between agents
+3. Detecting crashed agents and releasing their locks
+4. Notifying agents when their stream's parent changes
+
+This dataplane provides defensive checks but trusts the coordinator for correctness.
 
 ---
 
@@ -614,11 +702,11 @@ If concurrency becomes a problem:
 
 This section documents limitations compared to more sophisticated systems (like jj) and our mitigation strategies.
 
-### 7.1 Concurrency Model Limitations
+### 7.1 Concurrency Model
 
-#### The Problem
+#### The Constraint
 
-True concurrent writes to the same stream will cause corruption or data loss:
+Multiple agents cannot safely write to the **same stream** simultaneously:
 
 ```
 Agent A                         Agent B
@@ -629,12 +717,34 @@ update branch → def456          update branch → 789xyz
                                 ← Agent A's commit is orphaned!
 ```
 
-#### Our Mitigation: Coordinator-Enforced Serialization
+However, agents on **different streams** can work fully concurrently.
 
-We assume an external coordinator that:
-1. Assigns streams to agents
-2. Ensures only one agent writes to a stream at a time
-3. Manages handoffs between agents
+#### Our Model: Parallel Streams with Branching/Merging
+
+Multiple agents working on the same issue use **parallel streams** that branch and merge:
+
+```
+                    main
+                      │
+         ┌────────────┴────────────┐
+         ▼                         ▼
+    stream-auth-1              stream-auth-2
+    (agent-1)                  (agent-2)
+         │                         │
+         └──────────┬──────────────┘
+                    ▼
+              stream-auth-merged
+              (coordinator merges)
+```
+
+This provides:
+- Full isolation during development
+- Clear merge points for integration
+- No concurrent write conflicts
+
+#### Coordinator Contract
+
+The external coordinator must ensure:
 
 ```python
 class CoordinatorContract:
@@ -642,72 +752,67 @@ class CoordinatorContract:
     Contract the coordinator must uphold.
     This is NOT implemented here - it's the coordinator's responsibility.
     """
-    
+
     def assign_stream(self, stream_id: str, agent_id: str) -> bool:
         """
         Assign exclusive write access to an agent.
         Returns False if stream is already assigned.
         """
         ...
-    
+
     def release_stream(self, stream_id: str, agent_id: str) -> None:
         """Release write access."""
         ...
-    
+
     def transfer_stream(self, stream_id: str, from_agent: str, to_agent: str) -> bool:
         """Atomically transfer ownership."""
         ...
 ```
 
-#### Defensive Measures (Belt and Suspenders)
+#### Defensive Measures
 
-Even with coordinator guarantees, we add defensive checks:
+SQLite WAL handles database concurrency. Stream locks (Section 6) provide additional safety:
 
 ```python
 class StreamGuard:
     """
     Lightweight guard against accidental concurrent access.
-    Not a substitute for coordinator-level serialization.
+    Uses SQLite transactions - safe for concurrent access.
     """
-    
-    def __init__(self, db: TinyDB):
+
+    def __init__(self, db: Database):
         self.guards = db.table('stream_guards')
-    
+
     def check_and_set(self, stream_id: str, agent_id: str) -> bool:
         """
         Attempt to become the active writer.
         Fails if another agent is active and recently wrote.
         """
-        Q = Query()
-        existing = self.guards.get(Q.stream_id == stream_id)
-        
         now = time.time()
         stale_threshold = 60  # seconds
-        
-        if existing:
-            if existing['agent_id'] != agent_id:
-                if now - existing['last_write'] < stale_threshold:
-                    # Another agent is actively writing
-                    return False
-                # Stale guard, take over
-        
-        self.guards.upsert({
-            'stream_id': stream_id,
-            'agent_id': agent_id,
-            'last_write': now
-        }, Q.stream_id == stream_id)
-        return True
-    
+
+        with self.db.transaction():
+            existing = self.guards.get(stream_id=stream_id)
+
+            if existing:
+                if existing.agent_id != agent_id:
+                    if now - existing.last_write < stale_threshold:
+                        return False  # Another agent is actively writing
+
+            self.guards.upsert(
+                stream_id=stream_id,
+                agent_id=agent_id,
+                last_write=now
+            )
+            return True
+
     def touch(self, stream_id: str, agent_id: str) -> None:
         """Update last_write timestamp during long operations."""
-        Q = Query()
-        self.guards.update({'last_write': time.time()}, 
-                          (Q.stream_id == stream_id) & (Q.agent_id == agent_id))
-    
+        self.guards.update(stream_id=stream_id, agent_id=agent_id, last_write=time.time())
+
     def release(self, stream_id: str, agent_id: str) -> None:
         """Explicitly release guard."""
-        Q = Query()
-        self.guards.remove((Q.stream_id == stream_id) & (Q.agent_id == agent_id))
+        self.guards.delete(stream_id=stream_id, agent_id=agent_id)
 ```
 
 #### What We Explicitly Don't Support
@@ -716,7 +821,7 @@ class StreamGuard:
 - Automatic merge of divergent operation histories
 - Lock-free concurrent mutations
 
-These require data structures we don't have (content-addressed operation log, CRDT-like merge). If you need these, use jj.
+These require data structures we don't have (content-addressed operation log, CRDT-like merge). Future jj backend would provide these.
 
 ---
 
@@ -733,7 +838,37 @@ After rebase: def456 "add feature"  ← Same content, different identity
 
 jj solves this with "change IDs" - stable identifiers that survive rewrites.
 
-#### Our Mitigation: Change Tracking Table
+#### Our Solution: Commit Message Trailers + Tracking Table
+
+We use **Gerrit-style commit message trailers** as the primary identity mechanism. The Change-Id lives in the commit message and survives rebases naturally:
+
+```
+feat: add user authentication
+
+Implements OAuth2 flow with refresh tokens.
+
+Change-Id: c-a1b2c3d4
+```
+
+This is combined with a tracking table for history and edge case handling.
+
+```python
+def extract_change_id(commit_msg: str) -> Optional[str]:
+    """Parse Change-Id trailer from commit message."""
+    for line in reversed(commit_msg.strip().split('\n')):
+        if line.startswith('Change-Id: '):
+            return line.split(': ', 1)[1]
+    return None
+
+def ensure_change_id(commit_msg: str) -> str:
+    """Add Change-Id trailer if missing."""
+    if extract_change_id(commit_msg):
+        return commit_msg
+    change_id = f"c-{uuid.uuid4().hex[:8]}"
+    return f"{commit_msg.rstrip()}\n\nChange-Id: {change_id}"
+```
+
+#### Tracking Table (for history and edge cases)
 
 ```python
 @dataclass
@@ -1557,11 +1692,12 @@ def rebase_onto_stream_safe(
 
 | Gap | Mitigation | Remaining Limitation |
 |-----|------------|---------------------|
-| Lock-free concurrency | Coordinator-enforced serialization + guards | No true concurrent writes |
-| Stable change IDs | Change tracking table with history | Squash/split require manual recording |
+| Lock-free concurrency | SQLite WAL + parallel streams model | No same-stream concurrent writes (by design) |
+| Stable change IDs | Commit message trailers + tracking table | Squash/split require manual recording |
 | First-class conflicts | Conflict deferral mode | Markers visible in files |
-| Complex cascade rebase | Dependency graph + topological sort | Merge-diamonds need manual resolution |
+| Complex cascade rebase | Dependency graph + topological sort | Diamonds restricted, graceful fallback |
 | WC snapshots | Auto-snapshot wrapper | Must opt-in per operation |
+| jj compatibility | VCSBackend abstraction | Deferred features (lock-free, native conflicts) |
 
 ---
 
@@ -1700,12 +1836,12 @@ Agent: agent-1
 3. **Shared streams**: Multiple agents can write (needs concurrency control)
 4. **Role-based**: Agents have roles (owner, contributor, reviewer)
 
-**Decision**: Single owner with explicit handoff. Coordinator is responsible for ensuring only one agent writes at a time. See Section 7.1 for coordinator contract.
+**Decision**: ✅ **RESOLVED** - Single owner with explicit handoff. Multiple agents on same issue use **parallel streams that branch and merge** (not shared streams). Coordinator is responsible for ensuring only one agent writes to any given stream. See Section 7.1 for the parallel streams model.
 
 **Implications**:
-- Coordinator must track stream assignments
-- Handoff requires explicit transfer operation
-- Operations log attributes all changes to current owner
+- Each agent gets their own stream(s)
+- Coordinator manages merging parallel work
+- No concurrent write conflicts by design
 
 ### 10.2 Stack Entry Identity Across Rebases
 
@@ -1716,8 +1852,9 @@ Agent: agent-1
 2. **Stack position**: "Third commit in stack" (fragile if reordered)
 3. **Content hash**: Hash of diff content (expensive to compute)
 4. **Explicit ID**: UUID assigned when stack entry created
+5. **Commit message trailer**: Gerrit-style Change-Id embedded in commit
 
-**Decision**: Use Change Tracking Table (Section 7.2) with stable UUIDs and commit history. Each logical change gets a permanent ID, with a history of all commit hashes it has had.
+**Decision**: ✅ **RESOLVED** - Use **commit message trailers** (Gerrit-style `Change-Id: c-xxxx`) as primary identity, backed by tracking table for history. The trailer survives rebases naturally since git preserves commit messages. See Section 7.2 for implementation.
 
 **Remaining limitation**: Squash and split require explicit recording—auto-detection is unreliable.
 
@@ -1742,7 +1879,7 @@ Agent: agent-1
 3. **Snapshot references**: B references specific commit, not "head of A"
 4. **Prevent divergence**: Lock dependent streams during rebase
 
-**Decision**: Eager cascade for linear chains and fan-out (Section 7.4). Uses topological sort to determine order. Diamond merges (multiple parents) detected and flagged for manual resolution.
+**Decision**: ✅ **RESOLVED** - Eager cascade for linear chains and fan-out (Section 7.4). Uses topological sort to determine order. **Diamond merges are restricted** - the model discourages them, and when detected they are flagged for manual resolution or graceful fallback.
 
 ### 10.4 Merge vs Rebase for Integration
 
@@ -1776,33 +1913,104 @@ Agent: agent-1
 3. **Hard gates**: Block operations on approved commits
 4. **Reset on change**: Any modification resets review status to draft
 
-**Decision**: Soft gates with status tracking:
-- Operations on reviewed/approved commits emit warnings
-- Amending a commit resets its status to "draft"  
+**Decision**: ✅ **RESOLVED** - **Stacked diffs are opt-in per stream** (`enable_stacked_review` field). When enabled:
+- Operations on reviewed/approved commits emit warnings (soft gates)
+- Amending a commit resets its status to "draft"
 - Rebasing preserves status but adds "needs_rereview" flag
 - Hard blocks only on "merged" status (immutable)
+
+When disabled, commits are tracked but no review workflow is enforced.
 
 ### 10.6 Garbage Collection
 
 **Question**: When do we clean up merged/abandoned streams?
 
 **Considerations**:
+
 - Git branches accumulate (performance impact)
 - Operation history grows unbounded
 - Worktrees consume disk space
 - Need to preserve history for audit
 
-**Options**:
-1. **Manual cleanup**: Explicit `prune_streams()` call
-2. **Time-based**: Remove streams merged/abandoned > N days ago
-3. **Archive mode**: Move old data to separate archive DB
-4. **Never delete**: Disk is cheap, audit trail is valuable
+**Decision**: ✅ **RESOLVED** - Archive → gradual delete pipeline with explicit GC calls.
 
-**Decision**: Manual cleanup with archive mode:
-- `archive_stream()` moves to `archived_streams` table, keeps operation history
-- `prune_archived(days=N)` removes archived streams older than N days
-- Git branches for archived streams are deleted
-- Worktrees are removed when agent is deallocated
+#### GC Pipeline
+
+```
+Stream lifecycle:
+  active → merged/abandoned → archived → pruned (deleted)
+                    ↑              ↑           ↑
+              auto-archive    retention    explicit prune
+                             period ends
+```
+
+#### Configuration
+
+```python
+@dataclass
+class GCConfig:
+    # Automatic archival (on state change)
+    auto_archive_on_merge: bool = True
+    auto_archive_on_abandon: bool = True
+
+    # Retention
+    archive_retention_days: int = 30      # Suggest prune after N days
+
+    # What to clean on prune
+    delete_git_branches: bool = True      # Remove stream/* branches
+    delete_worktrees: bool = True         # Remove deallocated worktrees
+```
+
+#### API
+
+```python
+def archive_stream(stream_id: str) -> None:
+    """
+    Move stream to archived state.
+
+    - Moves to archived_streams table
+    - Retains full operation history
+    - Git branch kept until prune
+    - Called automatically on merge/abandon (if configured)
+    """
+
+def prune(older_than_days: int = 30) -> PruneResult:
+    """
+    Delete archived streams past retention period.
+
+    - Removes from database entirely
+    - Deletes git branches (stream/*)
+    - Returns count of pruned streams
+    """
+
+def gc() -> GCResult:
+    """
+    Run full garbage collection.
+
+    1. Archive any merged/abandoned streams not yet archived
+    2. Prune archived streams past retention
+    3. Clean up deallocated worktrees
+    4. Return summary of actions taken
+    """
+
+def deallocate_worktree(agent_id: str) -> None:
+    """
+    Explicitly remove an agent's worktree.
+
+    Worktrees are only cleaned up via explicit deallocation.
+    """
+```
+
+#### What We Keep Forever
+
+- **Operation log**: Full history retained until explicit removal
+- **Change history**: All commit mappings preserved
+
+#### Future Enhancement
+
+- Orphaned worktree detection (agent crashed without cleanup)
+- Background/scheduled GC option
+- Operation log compaction (optional, lossy)
 
 ### 10.7 Cross-Agent Communication
 
@@ -2018,14 +2226,15 @@ op4 = tracker.record_operation(stream, "agent-1", "commit", before, after)
 |------|------------|
 | Stream | A logical unit of work, maps to a git branch |
 | Operation | A single mutation to repo state, forms audit trail |
-| Stack | Ordered commits in a stream for incremental review |
+| Stack | Ordered commits in a stream for incremental review (opt-in) |
 | Worktree | Isolated filesystem checkout for an agent |
 | Base commit | The commit a stream branched from |
 | Fork point | Same as base commit, emphasizes relationship to parent |
 | Cascade rebase | Rebasing all dependent streams after parent changes |
 | Stacked diff | A commit intended for individual review as part of a series |
 | Change | A logical unit tracked across rebases (stable identity) |
-| Change ID | Stable UUID for a change, survives rewrites |
+| Change-Id | Gerrit-style commit trailer (`Change-Id: c-xxxx`) providing stable identity |
+| Commit trailer | Metadata line at end of commit message (key: value format) |
 | Commit history | List of all git commits a change has been (newest first) |
 | Dependency graph | DAG of stream fork/merge relationships |
 | Topological sort | Ordering streams so parents come before children |
@@ -2034,6 +2243,10 @@ op4 = tracker.record_operation(stream, "agent-1", "commit", before, after)
 | Working copy snapshot | Saved state of uncommitted changes |
 | Coordinator | External system that assigns agents to streams |
 | Coordinator contract | Guarantees the coordinator must provide |
-| Diamond dependency | Stream depending on multiple parents (complex case) |
-| Fan-out | One parent stream with multiple children (simple case) |
+| Diamond dependency | Stream depending on multiple parents (restricted/discouraged) |
+| Fan-out | One parent stream with multiple children (fully supported) |
 | Patch-id | Hash of a commit's diff, stable across rebases if content unchanged |
+| TinyBase | Python database interface using SQLite with WAL mode |
+| SQLite WAL | Write-Ahead Logging mode enabling concurrent reads/writes |
+| VCSBackend | Abstract interface for git/jj, enables future backend swap |
+| Parallel streams | Multiple agents working on same issue via separate streams that merge |
