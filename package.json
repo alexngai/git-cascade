@@ -1,7 +1,7 @@
 {
   "name": "dataplane",
   "version": "0.1.0",
-  "description": "Data plane SDK",
+  "description": "Multi-agent git tracking system for coordinating AI agents on shared codebases",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
@@ -12,27 +12,29 @@
       "import": "./dist/index.js"
     }
   },
-  "bin": {
-    "dataplane": "./dist/cli.js"
-  },
   "files": [
     "dist"
   ],
   "scripts": {
     "build": "tsc",
-    "dev": "tsc --watch",
-    "prepublishOnly": "npm run build",
-    "publish:npm": "npm publish --access public",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "tsx watch src/index.ts",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "lint": "eslint src --ext .ts",
+    "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\"",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/alexngai/dataplane.git"
   },
   "keywords": [
-    "data",
-    "dataplane",
-    "sdk"
+    "git",
+    "multi-agent",
+    "ai",
+    "version-control",
+    "coordination"
   ],
   "author": "Alex Ngai",
   "license": "MIT",
@@ -40,11 +42,18 @@
     "url": "https://github.com/alexngai/dataplane/issues"
   },
   "homepage": "https://github.com/alexngai/dataplane#readme",
-  "devDependencies": {
-    "@types/node": "^22.0.0",
-    "typescript": "^5.7.0"
-  },
   "engines": {
-    "node": ">=18"
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.6.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^22.10.2",
+    "prettier": "^3.4.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
   }
 }

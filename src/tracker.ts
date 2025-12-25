@@ -1,0 +1,195 @@
+/**
+ * MultiAgentRepoTracker - Main entry point for the dataplane.
+ *
+ * Coordinates multiple AI agents working on a shared git repository.
+ */
+
+import Database from 'better-sqlite3';
+import { createDatabase, closeDatabase } from './db/index.js';
+import { getTableNames, registerTables, type TableNames } from './db/tables.js';
+import * as streams from './streams.js';
+import * as operations from './operations.js';
+import * as worktrees from './worktrees.js';
+import * as rollback from './rollback.js';
+import type {
+  Stream,
+  StreamStatus,
+  CreateStreamOptions,
+  ForkStreamOptions,
+  MergeStreamOptions,
+  MergeResult,
+  Operation,
+  RecordOperationOptions,
+  AgentWorktree,
+  CreateWorktreeOptions,
+} from './models/index.js';
+import type {
+  RollbackToOperationOptions,
+  RollbackNOptions,
+  RollbackToForkPointOptions,
+} from './rollback.js';
+
+export interface TrackerOptions {
+  /** Path to the git repository */
+  repoPath: string;
+  /** Path to the SQLite database file (ignored if db is provided) */
+  dbPath?: string;
+  /** Existing database connection (optional) */
+  db?: Database.Database;
+  /** Table name prefix (default: no prefix) */
+  tablePrefix?: string;
+  /** Enable verbose logging */
+  verbose?: boolean;
+}
+
+/**
+ * Main tracker class for multi-agent git coordination.
+ */
+export class MultiAgentRepoTracker {
+  readonly repoPath: string;
+  readonly db: Database.Database;
+  readonly tables: TableNames;
+  private readonly ownsDb: boolean;
+
+  constructor(options: TrackerOptions) {
+    this.repoPath = options.repoPath;
+    const prefix = options.tablePrefix ?? '';
+    this.tables = getTableNames(prefix);
+
+    if (options.db) {
+      // Use existing database
+      this.db = options.db;
+      this.ownsDb = false;
+      // Initialize schema in existing DB with prefix
+      createDatabase({ db: options.db, tablePrefix: prefix });
+    } else {
+      // Create new database
+      const dbPath = options.dbPath ?? `${options.repoPath}/.dataplane/tracker.db`;
+      this.db = createDatabase({ path: dbPath, tablePrefix: prefix, verbose: options.verbose });
+      this.ownsDb = true;
+    }
+
+    // Register table names for this database instance
+    registerTables(this.db, this.tables);
+  }
+
+  /**
+   * Close the tracker and release resources.
+   * Only closes the database if we created it (not if using existing DB).
+   */
+  close(): void {
+    if (this.ownsDb) {
+      closeDatabase(this.db);
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Stream Operations
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  createStream(options: CreateStreamOptions): string {
+    return streams.createStream(this.db, this.repoPath, options);
+  }
+
+  getStream(streamId: string): Stream | null {
+    return streams.getStream(this.db, streamId);
+  }
+
+  updateStream(
+    streamId: string,
+    updates: Partial<Pick<Stream, 'name' | 'status' | 'metadata'>>
+  ): void {
+    streams.updateStream(this.db, streamId, updates);
+  }
+
+  abandonStream(streamId: string, reason?: string): void {
+    streams.abandonStream(this.db, streamId, reason);
+  }
+
+  forkStream(options: ForkStreamOptions): string {
+    return streams.forkStream(this.db, this.repoPath, options);
+  }
+
+  mergeStream(options: MergeStreamOptions): MergeResult {
+    return streams.mergeStream(this.db, this.repoPath, options);
+  }
+
+  listStreams(options?: {
+    agentId?: string;
+    status?: StreamStatus;
+  }): Stream[] {
+    return streams.listStreams(this.db, options);
+  }
+
+  getStreamHead(streamId: string): string {
+    return streams.getStreamHead(this.repoPath, streamId);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Operation Logging
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  recordOperation(options: RecordOperationOptions): string {
+    return operations.recordOperation(this.db, options);
+  }
+
+  getOperation(operationId: string): Operation | null {
+    return operations.getOperation(this.db, operationId);
+  }
+
+  getOperations(options?: {
+    streamId?: string;
+    agentId?: string;
+    since?: number;
+  }): Operation[] {
+    return operations.getOperations(this.db, options);
+  }
+
+  getLatestOperation(streamId: string): Operation | null {
+    return operations.getLatestOperation(this.db, streamId);
+  }
+
+  getOperationChain(operationId: string): Operation[] {
+    return operations.getOperationChain(this.db, operationId);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Worktree Management
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  createWorktree(options: CreateWorktreeOptions): AgentWorktree {
+    return worktrees.createWorktree(this.db, this.repoPath, options);
+  }
+
+  getWorktree(agentId: string): AgentWorktree | null {
+    return worktrees.getWorktree(this.db, agentId);
+  }
+
+  updateWorktreeStream(agentId: string, streamId: string | null): void {
+    worktrees.updateWorktreeStream(this.db, this.repoPath, agentId, streamId);
+  }
+
+  deallocateWorktree(agentId: string): void {
+    worktrees.deallocateWorktree(this.db, this.repoPath, agentId);
+  }
+
+  listWorktrees(): AgentWorktree[] {
+    return worktrees.listWorktrees(this.db);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Rollback Operations
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  rollbackToOperation(options: RollbackToOperationOptions): void {
+    rollback.rollbackToOperation(this.db, this.repoPath, options);
+  }
+
+  rollbackN(options: RollbackNOptions): void {
+    rollback.rollbackN(this.db, this.repoPath, options);
+  }
+
+  rollbackToForkPoint(options: RollbackToForkPointOptions): void {
+    rollback.rollbackToForkPoint(this.db, this.repoPath, options);
+  }
+}
