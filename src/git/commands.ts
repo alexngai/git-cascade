@@ -329,3 +329,72 @@ export function listWorktrees(options: GitOptions): WorktreeListEntry[] {
 export function pruneWorktrees(options: GitOptions): void {
   git(['worktree', 'prune'], options);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Patch-ID Operations (for tracking commits across rebases)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Get git patch-id for a commit.
+ *
+ * Patch-id is a stable hash of the diff content, surviving rebases
+ * and commit message changes. This is useful for tracking the "same"
+ * logical change across rebases where commit hashes change.
+ *
+ * @param commit - The commit hash to get patch-id for
+ * @param options - Git options including cwd
+ * @returns The patch-id hash
+ */
+export function getPatchId(commit: string, options: GitOptions): string {
+  const execOptions = {
+    cwd: options.cwd,
+    encoding: 'utf-8' as const,
+    env: { ...process.env, ...options.env },
+    maxBuffer: 50 * 1024 * 1024,
+  };
+
+  try {
+    // git show <commit> | git patch-id --stable
+    const result = execSync(
+      `git show ${quoteArg(commit)} | git patch-id --stable`,
+      execOptions
+    );
+    const output = (result as string).trim();
+    // Output format: "<patch-id> <commit>"
+    const patchId = output.split(' ')[0];
+    if (!patchId) {
+      throw new GitOperationError(`Failed to get patch-id for ${commit}: empty output`);
+    }
+    return patchId;
+  } catch (error) {
+    const err = error as { status?: number; stderr?: Buffer | string };
+    const stderr = err.stderr?.toString() ?? '';
+    throw new GitOperationError(`Failed to get patch-id for ${commit}: ${stderr}`);
+  }
+}
+
+/**
+ * Build a map of patch-ids to commit hashes for a range of commits.
+ *
+ * Useful for rebuilding stacks after rebase - find which new commit
+ * corresponds to which old commit by matching patch-ids.
+ *
+ * @param commits - Array of commit hashes
+ * @param options - Git options including cwd
+ * @returns Map from patch-id to commit hash
+ */
+export function buildPatchIdMap(
+  commits: string[],
+  options: GitOptions
+): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const commit of commits) {
+    try {
+      const patchId = getPatchId(commit, options);
+      map.set(patchId, commit);
+    } catch {
+      // Skip commits that fail (e.g., merge commits have no patch-id)
+    }
+  }
+  return map;
+}

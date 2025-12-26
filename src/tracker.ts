@@ -11,6 +11,7 @@ import * as streams from './streams.js';
 import * as operations from './operations.js';
 import * as worktrees from './worktrees.js';
 import * as rollback from './rollback.js';
+import * as stacks from './stacks.js';
 import type {
   Stream,
   StreamStatus,
@@ -22,6 +23,10 @@ import type {
   RecordOperationOptions,
   AgentWorktree,
   CreateWorktreeOptions,
+  ReviewBlock,
+  StackConfig,
+  CreateReviewBlockOptions,
+  SetReviewStatusOptions,
 } from './models/index.js';
 import type {
   RollbackToOperationOptions,
@@ -191,5 +196,77 @@ export class MultiAgentRepoTracker {
 
   rollbackToForkPoint(options: RollbackToForkPointOptions): void {
     rollback.rollbackToForkPoint(this.db, this.repoPath, options);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Stack & Review Block Operations
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  createReviewBlock(options: CreateReviewBlockOptions): string {
+    return stacks.createReviewBlock(this.db, options);
+  }
+
+  getReviewBlock(reviewBlockId: string): ReviewBlock | null {
+    return stacks.getReviewBlock(this.db, reviewBlockId);
+  }
+
+  getStack(streamId: string, stackName?: string): ReviewBlock[] {
+    return stacks.getStack(this.db, streamId, stackName);
+  }
+
+  setReviewStatus(options: SetReviewStatusOptions): void {
+    stacks.setReviewStatus(this.db, options);
+  }
+
+  deleteReviewBlock(reviewBlockId: string): void {
+    stacks.deleteReviewBlock(this.db, reviewBlockId);
+  }
+
+  addCommitsToBlock(reviewBlockId: string, commits: string[]): void {
+    stacks.addCommitsToBlock(this.db, reviewBlockId, commits);
+  }
+
+  removeCommitsFromBlock(reviewBlockId: string, commits: string[]): void {
+    stacks.removeCommitsFromBlock(this.db, reviewBlockId, commits);
+  }
+
+  splitReviewBlock(
+    reviewBlockId: string,
+    splitAfterPosition: number,
+    newTitle: string
+  ): string {
+    return stacks.splitReviewBlock(this.db, reviewBlockId, splitAfterPosition, newTitle);
+  }
+
+  mergeReviewBlocks(
+    reviewBlockIds: string[],
+    title: string,
+    description?: string
+  ): string {
+    return stacks.mergeReviewBlocks(this.db, reviewBlockIds, title, description);
+  }
+
+  rebuildStack(streamId: string, stackName?: string): void {
+    stacks.rebuildStack(this.db, this.repoPath, streamId, stackName);
+  }
+
+  autoPopulateStack(streamId: string, stackName?: string): void {
+    stacks.autoPopulateStack(this.db, this.repoPath, streamId, stackName);
+  }
+
+  getStackConfig(streamId: string, stackName?: string): StackConfig {
+    return stacks.getStackConfig(this.db, streamId, stackName);
+  }
+
+  setStackConfig(
+    streamId: string,
+    stackName: string,
+    config: Partial<StackConfig>
+  ): void {
+    stacks.setStackConfig(this.db, streamId, stackName, config);
+  }
+
+  listStacks(streamId: string): string[] {
+    return stacks.listStacks(this.db, streamId);
   }
 }

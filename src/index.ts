@@ -17,5 +17,8 @@ export { createDatabase, closeDatabase } from './db/index.js';
 // Git helpers
 export * from './git/index.js';
 
+// Stack operations (low-level API)
+export * as stacks from './stacks.js';
+
 // Errors
 export * from './errors.js';

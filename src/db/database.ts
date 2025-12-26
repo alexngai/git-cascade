@@ -86,17 +86,38 @@ function initializeSchema(db: Database.Database, prefix: string): void {
       FOREIGN KEY (stream_id) REFERENCES ${prefix}streams(id)
     );
 
-    -- Stack entries table
-    CREATE TABLE IF NOT EXISTS ${prefix}stack_entries (
+    -- Review blocks table (reviewable units containing one or more commits)
+    CREATE TABLE IF NOT EXISTS ${prefix}review_blocks (
       id TEXT PRIMARY KEY,
       stream_id TEXT NOT NULL,
-      commit_hash TEXT NOT NULL,
+      stack_name TEXT NOT NULL DEFAULT 'default',
       position INTEGER NOT NULL,
-      description TEXT NOT NULL,
+      title TEXT NOT NULL,
+      description TEXT,
       review_status TEXT NOT NULL DEFAULT 'draft',
       reviewed_by TEXT,
       reviewed_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (stream_id) REFERENCES ${prefix}streams(id)
+    );
+
+    -- Stack entries table (commits within review blocks)
+    CREATE TABLE IF NOT EXISTS ${prefix}stack_entries (
+      id TEXT PRIMARY KEY,
+      review_block_id TEXT NOT NULL,
+      commit_hash TEXT NOT NULL,
+      commit_position INTEGER NOT NULL,
       original_commit TEXT NOT NULL,
+      FOREIGN KEY (review_block_id) REFERENCES ${prefix}review_blocks(id) ON DELETE CASCADE
+    );
+
+    -- Stack configs table (per-stream per-stack configuration)
+    CREATE TABLE IF NOT EXISTS ${prefix}stack_configs (
+      stream_id TEXT NOT NULL,
+      stack_name TEXT NOT NULL DEFAULT 'default',
+      config_json TEXT NOT NULL DEFAULT '{}',
+      PRIMARY KEY (stream_id, stack_name),
       FOREIGN KEY (stream_id) REFERENCES ${prefix}streams(id)
     );
 
@@ -197,7 +218,11 @@ function initializeSchema(db: Database.Database, prefix: string): void {
     CREATE INDEX IF NOT EXISTS ${prefix}idx_streams_parent ON ${prefix}streams(parent_stream);
     CREATE INDEX IF NOT EXISTS ${prefix}idx_operations_stream ON ${prefix}operations(stream_id);
     CREATE INDEX IF NOT EXISTS ${prefix}idx_operations_timestamp ON ${prefix}operations(timestamp);
-    CREATE INDEX IF NOT EXISTS ${prefix}idx_stack_entries_stream ON ${prefix}stack_entries(stream_id);
+    CREATE INDEX IF NOT EXISTS ${prefix}idx_review_blocks_stream ON ${prefix}review_blocks(stream_id);
+    CREATE INDEX IF NOT EXISTS ${prefix}idx_review_blocks_stack ON ${prefix}review_blocks(stream_id, stack_name);
+    CREATE INDEX IF NOT EXISTS ${prefix}idx_stack_entries_block ON ${prefix}stack_entries(review_block_id);
+    CREATE INDEX IF NOT EXISTS ${prefix}idx_stack_entries_commit ON ${prefix}stack_entries(commit_hash);
+    CREATE INDEX IF NOT EXISTS ${prefix}idx_stack_entries_original ON ${prefix}stack_entries(original_commit);
     CREATE INDEX IF NOT EXISTS ${prefix}idx_changes_stream ON ${prefix}changes(stream_id);
     CREATE INDEX IF NOT EXISTS ${prefix}idx_changes_current_commit ON ${prefix}changes(current_commit);
     CREATE INDEX IF NOT EXISTS ${prefix}idx_conflicts_stream ON ${prefix}conflicts(stream_id);

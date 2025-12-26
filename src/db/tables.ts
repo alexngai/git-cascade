@@ -7,7 +7,9 @@ import type Database from 'better-sqlite3';
 export interface TableNames {
   streams: string;
   operations: string;
+  review_blocks: string;
   stack_entries: string;
+  stack_configs: string;
   agent_worktrees: string;
   stream_locks: string;
   stream_guards: string;
@@ -30,7 +32,9 @@ export function getTableNames(prefix: string = ''): TableNames {
   return {
     streams: `${prefix}streams`,
     operations: `${prefix}operations`,
+    review_blocks: `${prefix}review_blocks`,
     stack_entries: `${prefix}stack_entries`,
+    stack_configs: `${prefix}stack_configs`,
     agent_worktrees: `${prefix}agent_worktrees`,
     stream_locks: `${prefix}stream_locks`,
     stream_guards: `${prefix}stream_guards`,
