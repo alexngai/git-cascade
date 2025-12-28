@@ -66,3 +66,85 @@ export interface MergeResult {
   conflicts?: string[];
   error?: string;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rebase Types
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Conflict resolution strategy for rebase operations.
+ */
+export type ConflictStrategy =
+  | 'abort'   // Abort rebase, return conflict info (default)
+  | 'ours'    // Accept current branch changes
+  | 'theirs'  // Accept incoming changes
+  | 'agent'   // Call conflict handler for agent resolution (Phase 6)
+  | 'manual'; // Fail out, let user resolve manually
+
+/**
+ * Information about a conflict during rebase.
+ */
+export interface ConflictInfo {
+  /** File path with conflict */
+  file: string;
+  /** Conflict markers content (if available) */
+  markers?: string;
+}
+
+/**
+ * Handler function for agent-based conflict resolution.
+ */
+export type ConflictHandler = (
+  conflicts: ConflictInfo[],
+  worktree: string
+) => Promise<boolean>;
+
+/**
+ * Options for rebaseOntoStream operation.
+ */
+export interface RebaseOntoStreamOptions {
+  /** Stream to rebase */
+  sourceStream: string;
+  /** Stream to rebase onto */
+  targetStream: string;
+  /** Agent performing the rebase */
+  agentId: string;
+  /** Worktree path for git operations */
+  worktree: string;
+  /** Conflict resolution strategy (default: 'abort') */
+  onConflict?: ConflictStrategy;
+  /** Handler for agent-based conflict resolution */
+  conflictHandler?: ConflictHandler;
+}
+
+/**
+ * Result of a rebase operation.
+ */
+export interface RebaseResult {
+  /** Whether rebase completed successfully */
+  success: boolean;
+  /** New head commit after rebase */
+  newHead?: string;
+  /** New base commit (target's head) */
+  newBaseCommit?: string;
+  /** Conflict information if rebase failed due to conflicts */
+  conflicts?: ConflictInfo[];
+  /** Error message if rebase failed */
+  error?: string;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Stream Graph Types
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Node in the stream graph tree.
+ */
+export interface StreamNode {
+  /** The stream at this node */
+  stream: Stream;
+  /** Child streams (forked from this stream) */
+  children: StreamNode[];
+  /** IDs of streams this stream depends on */
+  dependencies: string[];
+}

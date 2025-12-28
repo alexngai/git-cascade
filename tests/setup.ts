@@ -32,6 +32,10 @@ export function initGitRepo(dir: string): void {
   execSync('git config user.email "test@example.com"', { cwd: dir, stdio: 'pipe' });
   execSync('git config user.name "Test User"', { cwd: dir, stdio: 'pipe' });
 
+  // Create .gitignore to exclude dataplane database files
+  const gitignorePath = path.join(dir, '.gitignore');
+  fs.writeFileSync(gitignorePath, '.dataplane/\n');
+
   // Create initial commit
   const readmePath = path.join(dir, 'README.md');
   fs.writeFileSync(readmePath, '# Test Repository\n');

@@ -12,8 +12,14 @@ import type {
   ForkStreamOptions,
   MergeStreamOptions,
   MergeResult,
+  RebaseOntoStreamOptions,
+  RebaseResult,
+  ConflictInfo,
+  StreamNode,
 } from './models/index.js';
 import * as git from './git/index.js';
+import * as stacks from './stacks.js';
+import * as deps from './dependencies.js';
 import { StreamNotFoundError, BranchNotFoundError } from './errors.js';
 
 /**
@@ -290,4 +296,253 @@ export function getStreamHead(repoPath: string, streamId: string): string {
   } catch {
     throw new BranchNotFoundError(branchName);
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rebase Operations
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Rebase a stream onto another stream's head.
+ *
+ * This operation:
+ * 1. Rebases source stream's commits onto target stream's head
+ * 2. Updates source stream's baseCommit to target's head
+ * 3. If enableStackedReview=true, rebuilds the stack
+ */
+export function rebaseOntoStream(
+  db: Database.Database,
+  _repoPath: string,
+  options: RebaseOntoStreamOptions
+): RebaseResult {
+  const { sourceStream, targetStream, worktree } = options;
+  const onConflict = options.onConflict ?? 'abort';
+
+  // Validate streams exist
+  const source = getStreamOrThrow(db, sourceStream);
+  getStreamOrThrow(db, targetStream); // Validate target exists
+
+  const sourceBranch = `stream/${sourceStream}`;
+  const targetBranch = `stream/${targetStream}`;
+  const gitOpts = { cwd: worktree };
+
+  // Get target's current head (this will be the new base)
+  const targetHead = git.resolveRef(targetBranch, gitOpts);
+
+  // Check if source has any commits beyond its base
+  const commits = git.getCommitRange(source.baseCommit, sourceBranch, gitOpts);
+  if (commits.length === 0) {
+    // No commits to rebase, just update baseCommit
+    updateBaseCommit(db, sourceStream, targetHead);
+    git.checkout(sourceBranch, gitOpts);
+    git.resetHard(targetHead, gitOpts);
+    return {
+      success: true,
+      newHead: targetHead,
+      newBaseCommit: targetHead,
+    };
+  }
+
+  // Handle manual strategy - just fail if conflicts might occur
+  if (onConflict === 'manual') {
+    // Try the rebase without any conflict resolution
+    const result = git.rebaseOnto(targetHead, source.baseCommit, sourceBranch, gitOpts);
+    if (!result.success) {
+      // Abort and let user handle it
+      try {
+        git.rebaseAbort(gitOpts);
+      } catch {
+        // Ignore
+      }
+      const conflicts: ConflictInfo[] = (result.conflicts ?? []).map((f) => ({ file: f }));
+      return {
+        success: false,
+        conflicts,
+        error: 'Rebase has conflicts - manual resolution required',
+      };
+    }
+    // Success - update baseCommit and rebuild stack
+    updateBaseCommit(db, sourceStream, targetHead);
+    if (source.enableStackedReview) {
+      stacks.rebuildStack(db, worktree, sourceStream);
+    }
+    return {
+      success: true,
+      newHead: result.newHead,
+      newBaseCommit: targetHead,
+    };
+  }
+
+  // Handle agent strategy (deferred to Phase 6)
+  if (onConflict === 'agent') {
+    return {
+      success: false,
+      error: 'Agent conflict resolution not yet implemented (Phase 6)',
+    };
+  }
+
+  // Map our strategy to git strategy
+  const gitStrategy: git.RebaseConflictStrategy =
+    onConflict === 'ours' ? 'ours' : onConflict === 'theirs' ? 'theirs' : 'abort';
+
+  // Perform the rebase
+  const result = git.rebaseOntoWithStrategy(
+    targetHead,
+    source.baseCommit,
+    sourceBranch,
+    gitStrategy,
+    gitOpts
+  );
+
+  if (!result.success) {
+    const conflicts: ConflictInfo[] = (result.conflicts ?? []).map((f) => ({ file: f }));
+    return {
+      success: false,
+      conflicts,
+      error: result.error ?? 'Rebase failed due to conflicts',
+    };
+  }
+
+  // Update source stream's baseCommit
+  updateBaseCommit(db, sourceStream, targetHead);
+
+  // Rebuild stack if enabled
+  if (source.enableStackedReview) {
+    stacks.rebuildStack(db, worktree, sourceStream);
+  }
+
+  return {
+    success: true,
+    newHead: result.newHead,
+    newBaseCommit: targetHead,
+  };
+}
+
+/**
+ * Sync a stream with its parent (convenience wrapper).
+ */
+export function syncWithParent(
+  db: Database.Database,
+  _repoPath: string,
+  streamId: string,
+  agentId: string,
+  worktree: string,
+  onConflict?: RebaseOntoStreamOptions['onConflict']
+): RebaseResult {
+  const stream = getStreamOrThrow(db, streamId);
+
+  if (!stream.parentStream) {
+    throw new Error(`Stream ${streamId} has no parent stream`);
+  }
+
+  return rebaseOntoStream(db, _repoPath, {
+    sourceStream: streamId,
+    targetStream: stream.parentStream,
+    agentId,
+    worktree,
+    onConflict,
+  });
+}
+
+/**
+ * Update a stream's baseCommit.
+ */
+function updateBaseCommit(
+  db: Database.Database,
+  streamId: string,
+  newBaseCommit: string
+): void {
+  const t = getTables(db);
+  const now = Date.now();
+
+  db.prepare(`
+    UPDATE ${t.streams} SET base_commit = ?, updated_at = ?
+    WHERE id = ?
+  `).run(newBaseCommit, now, streamId);
+}
+
+/**
+ * Get child streams (streams forked from this stream).
+ */
+export function getChildStreams(
+  db: Database.Database,
+  streamId: string
+): Stream[] {
+  const t = getTables(db);
+
+  const rows = db.prepare(`
+    SELECT * FROM ${t.streams}
+    WHERE parent_stream = ?
+    ORDER BY created_at ASC
+  `).all(streamId) as Record<string, unknown>[];
+
+  return rows.map(rowToStream);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Stream Graph Operations
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Find the common ancestor commit between two streams.
+ */
+export function findCommonAncestor(
+  repoPath: string,
+  streamIdA: string,
+  streamIdB: string
+): string {
+  const branchA = `stream/${streamIdA}`;
+  const branchB = `stream/${streamIdB}`;
+  const gitOpts = { cwd: repoPath };
+
+  return git.getMergeBase(branchA, branchB, gitOpts);
+}
+
+/**
+ * Get root streams (streams with no parent).
+ */
+export function getRootStreams(db: Database.Database): Stream[] {
+  const t = getTables(db);
+
+  const rows = db.prepare(`
+    SELECT * FROM ${t.streams}
+    WHERE parent_stream IS NULL AND status != 'abandoned'
+    ORDER BY created_at ASC
+  `).all() as Record<string, unknown>[];
+
+  return rows.map(rowToStream);
+}
+
+/**
+ * Build a stream node recursively.
+ */
+function buildStreamNode(db: Database.Database, stream: Stream): StreamNode {
+  const children = getChildStreams(db, stream.id);
+  const dependencies = deps.getDependencies(db, stream.id);
+
+  return {
+    stream,
+    children: children.map((child) => buildStreamNode(db, child)),
+    dependencies,
+  };
+}
+
+/**
+ * Get stream graph as a tree structure.
+ *
+ * @param rootStreamId - If provided, returns tree from this stream
+ * @returns Single StreamNode if rootStreamId provided, otherwise array of root trees
+ */
+export function getStreamGraph(
+  db: Database.Database,
+  rootStreamId?: string
+): StreamNode | StreamNode[] {
+  if (rootStreamId) {
+    const stream = getStreamOrThrow(db, rootStreamId);
+    return buildStreamNode(db, stream);
+  }
+
+  // Return forest of all root streams
+  const roots = getRootStreams(db);
+  return roots.map((stream) => buildStreamNode(db, stream));
 }

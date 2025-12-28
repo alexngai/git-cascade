@@ -12,6 +12,7 @@ import * as operations from './operations.js';
 import * as worktrees from './worktrees.js';
 import * as rollback from './rollback.js';
 import * as stacks from './stacks.js';
+import * as deps from './dependencies.js';
 import type {
   Stream,
   StreamStatus,
@@ -27,6 +28,10 @@ import type {
   StackConfig,
   CreateReviewBlockOptions,
   SetReviewStatusOptions,
+  RebaseOntoStreamOptions,
+  RebaseResult,
+  ConflictStrategy,
+  StreamNode,
 } from './models/index.js';
 import type {
   RollbackToOperationOptions,
@@ -268,5 +273,65 @@ export class MultiAgentRepoTracker {
 
   listStacks(streamId: string): string[] {
     return stacks.listStacks(this.db, streamId);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Rebase Operations
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  rebaseOntoStream(options: RebaseOntoStreamOptions): RebaseResult {
+    return streams.rebaseOntoStream(this.db, this.repoPath, options);
+  }
+
+  syncWithParent(
+    streamId: string,
+    agentId: string,
+    worktree: string,
+    onConflict?: ConflictStrategy
+  ): RebaseResult {
+    return streams.syncWithParent(
+      this.db,
+      this.repoPath,
+      streamId,
+      agentId,
+      worktree,
+      onConflict
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Dependency Operations
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  addDependency(streamId: string, dependsOnId: string): void {
+    deps.addDependency(this.db, streamId, dependsOnId);
+  }
+
+  removeDependency(streamId: string, dependsOnId: string): void {
+    deps.removeDependency(this.db, streamId, dependsOnId);
+  }
+
+  getDependencies(streamId: string): string[] {
+    return deps.getDependencies(this.db, streamId);
+  }
+
+  getDependents(streamId: string): string[] {
+    return deps.getDependents(this.db, streamId);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Stream Graph Queries
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  getChildStreams(streamId: string): Stream[] {
+    return streams.getChildStreams(this.db, streamId);
+  }
+
+  findCommonAncestor(streamIdA: string, streamIdB: string): string {
+    return streams.findCommonAncestor(this.repoPath, streamIdA, streamIdB);
+  }
+
+  getStreamGraph(rootStreamId?: string): StreamNode | StreamNode[] {
+    return streams.getStreamGraph(this.db, rootStreamId);
   }
 }

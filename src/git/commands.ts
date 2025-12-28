@@ -398,3 +398,140 @@ export function buildPatchIdMap(
   }
   return map;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rebase Operations
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type RebaseConflictStrategy = 'abort' | 'ours' | 'theirs';
+
+export interface RebaseOntoResult {
+  success: boolean;
+  newHead?: string;
+  conflicts?: string[];
+  error?: string;
+}
+
+/**
+ * Rebase commits onto a new base.
+ *
+ * git rebase --onto <newbase> <upstream> [branch]
+ *
+ * This rebases commits from upstream..branch onto newbase.
+ *
+ * @param newBase - The commit to rebase onto
+ * @param upstream - The upstream commit (exclusive - commits after this are rebased)
+ * @param branch - The branch to rebase (optional, uses current if not specified)
+ * @param options - Git options including cwd
+ */
+export function rebaseOnto(
+  newBase: string,
+  upstream: string,
+  branch: string | undefined,
+  options: GitOptions
+): RebaseOntoResult {
+  try {
+    const args = ['rebase', '--onto', newBase, upstream];
+    if (branch) {
+      args.push(branch);
+    }
+    git(args, options);
+    return { success: true, newHead: getHead(options) };
+  } catch (error) {
+    // Check if there are conflicts
+    const conflicts = getConflictedFiles(options);
+    if (conflicts.length > 0) {
+      return { success: false, conflicts };
+    }
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+/**
+ * Rebase with a specific conflict resolution strategy.
+ *
+ * @param newBase - The commit to rebase onto
+ * @param upstream - The upstream commit (exclusive)
+ * @param branch - The branch to rebase
+ * @param strategy - How to handle conflicts
+ * @param options - Git options including cwd
+ */
+export function rebaseOntoWithStrategy(
+  newBase: string,
+  upstream: string,
+  branch: string,
+  strategy: RebaseConflictStrategy,
+  options: GitOptions
+): RebaseOntoResult {
+  // First checkout the branch
+  checkout(branch, options);
+
+  // Try rebase with strategy-specific options
+  const args = ['rebase', '--onto', newBase, upstream];
+
+  if (strategy === 'ours') {
+    // Note: In git rebase, --ours means keep the changes from the branch being rebased
+    // This is counterintuitive but correct
+    args.push('--strategy=recursive', '--strategy-option=ours');
+  } else if (strategy === 'theirs') {
+    args.push('--strategy=recursive', '--strategy-option=theirs');
+  }
+
+  try {
+    git(args, options);
+    return { success: true, newHead: getHead(options) };
+  } catch (error) {
+    const conflicts = getConflictedFiles(options);
+    if (conflicts.length > 0) {
+      if (strategy === 'abort') {
+        // Abort the rebase and return conflict info
+        try {
+          rebaseAbort(options);
+        } catch {
+          // Ignore abort errors
+        }
+        return { success: false, conflicts };
+      }
+      // For ours/theirs, we shouldn't normally get here, but handle it
+      return { success: false, conflicts };
+    }
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+/**
+ * Continue a rebase after resolving conflicts.
+ */
+export function rebaseContinue(options: GitOptions): void {
+  git(['rebase', '--continue'], options);
+}
+
+/**
+ * Skip the current commit during rebase.
+ */
+export function rebaseSkip(options: GitOptions): void {
+  git(['rebase', '--skip'], options);
+}
+
+/**
+ * Check if a rebase is in progress.
+ */
+export function isRebaseInProgress(options: GitOptions): boolean {
+  try {
+    // Check for .git/rebase-merge or .git/rebase-apply directories
+    const gitDir = git(['rev-parse', '--git-dir'], options);
+    const fs = require('fs');
+    const path = require('path');
+    const rebaseMerge = path.join(options.cwd, gitDir, 'rebase-merge');
+    const rebaseApply = path.join(options.cwd, gitDir, 'rebase-apply');
+    return fs.existsSync(rebaseMerge) || fs.existsSync(rebaseApply);
+  } catch {
+    return false;
+  }
+}

@@ -20,5 +20,11 @@ export * from './git/index.js';
 // Stack operations (low-level API)
 export * as stacks from './stacks.js';
 
+// Dependency operations (low-level API)
+export * as dependencies from './dependencies.js';
+
+// Stream operations (low-level API)
+export * as streams from './streams.js';
+
 // Errors
 export * from './errors.js';
