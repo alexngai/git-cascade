@@ -115,6 +115,11 @@ export interface RebaseOntoStreamOptions {
   onConflict?: ConflictStrategy;
   /** Handler for agent-based conflict resolution */
   conflictHandler?: ConflictHandler;
+  /**
+   * Cascade rebase to dependent streams (default: true).
+   * Set to false to disable automatic cascade.
+   */
+  cascade?: boolean;
 }
 
 /**
@@ -131,6 +136,8 @@ export interface RebaseResult {
   conflicts?: ConflictInfo[];
   /** Error message if rebase failed */
   error?: string;
+  /** Result of cascade rebase (if cascade was enabled) */
+  cascadeResult?: import('./dependency.js').CascadeResult;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

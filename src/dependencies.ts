@@ -9,6 +9,8 @@
 import type Database from 'better-sqlite3';
 import { getTables } from './db/tables.js';
 import { getStreamOrThrow } from './streams.js';
+import { CyclicDependencyError } from './errors.js';
+import type { DependencyType } from './models/index.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Dependency CRUD
@@ -107,12 +109,13 @@ export function wouldCreateCycle(
 /**
  * Add a dependency between streams.
  *
- * @throws Error if adding would create a cycle
+ * @throws CyclicDependencyError if adding would create a cycle
  */
 export function addDependency(
   db: Database.Database,
   streamId: string,
-  dependsOnId: string
+  dependsOnId: string,
+  dependencyType: DependencyType = 'rebase_onto'
 ): void {
   // Validate both streams exist
   getStreamOrThrow(db, streamId);
@@ -120,7 +123,7 @@ export function addDependency(
 
   // Check for cycles
   if (wouldCreateCycle(db, streamId, dependsOnId)) {
-    throw new Error(
+    throw new CyclicDependencyError(
       `Cannot add dependency: ${streamId} → ${dependsOnId} would create a cycle`
     );
   }
@@ -138,9 +141,53 @@ export function addDependency(
   // Upsert the dependency record
   db.prepare(`
     INSERT INTO ${t.dependencies} (stream_id, depends_on, dependency_type)
-    VALUES (?, ?, 'rebase')
-    ON CONFLICT (stream_id) DO UPDATE SET depends_on = ?
-  `).run(streamId, JSON.stringify(deps), JSON.stringify(deps));
+    VALUES (?, ?, ?)
+    ON CONFLICT (stream_id) DO UPDATE SET depends_on = ?, dependency_type = ?
+  `).run(streamId, JSON.stringify(deps), dependencyType, JSON.stringify(deps), dependencyType);
+}
+
+/**
+ * Add a fork dependency (called automatically by forkStream).
+ */
+export function addForkDependency(
+  db: Database.Database,
+  childStreamId: string,
+  parentStreamId: string
+): void {
+  addDependency(db, childStreamId, parentStreamId, 'fork');
+}
+
+/**
+ * Add a merge dependency (for streams that merge multiple parents).
+ */
+export function addMergeDependency(
+  db: Database.Database,
+  targetStreamId: string,
+  sourceStreamIds: string[]
+): void {
+  // Validate all streams exist
+  getStreamOrThrow(db, targetStreamId);
+  for (const sourceId of sourceStreamIds) {
+    getStreamOrThrow(db, sourceId);
+  }
+
+  // Check for cycles with each source
+  for (const sourceId of sourceStreamIds) {
+    if (wouldCreateCycle(db, targetStreamId, sourceId)) {
+      throw new CyclicDependencyError(
+        `Cannot add merge dependency: ${targetStreamId} → ${sourceId} would create a cycle`
+      );
+    }
+  }
+
+  const t = getTables(db);
+
+  // Upsert with all sources as dependencies
+  db.prepare(`
+    INSERT INTO ${t.dependencies} (stream_id, depends_on, dependency_type)
+    VALUES (?, ?, 'merge')
+    ON CONFLICT (stream_id) DO UPDATE SET depends_on = ?, dependency_type = 'merge'
+  `).run(targetStreamId, JSON.stringify(sourceStreamIds), JSON.stringify(sourceStreamIds));
 }
 
 /**
@@ -221,4 +268,114 @@ export function getAllDependents(
   }
 
   return Array.from(all);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Dependency Type and Graph Operations
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Get the dependency type for a stream.
+ */
+export function getDependencyType(
+  db: Database.Database,
+  streamId: string
+): DependencyType | null {
+  const t = getTables(db);
+
+  const row = db.prepare(`
+    SELECT dependency_type FROM ${t.dependencies}
+    WHERE stream_id = ?
+  `).get(streamId) as { dependency_type: string } | undefined;
+
+  return (row?.dependency_type as DependencyType) ?? null;
+}
+
+/**
+ * Check if a stream has a diamond dependency (multiple parents).
+ * Diamond dependencies require manual resolution during cascade rebase.
+ */
+export function isDiamondDependency(
+  db: Database.Database,
+  streamId: string
+): boolean {
+  const deps = getDependencies(db, streamId);
+  const depType = getDependencyType(db, streamId);
+
+  // Merge type explicitly has multiple parents
+  if (depType === 'merge') {
+    return true;
+  }
+
+  // Or if there are multiple dependencies regardless of type
+  return deps.length > 1;
+}
+
+/**
+ * Sort streams topologically so dependencies come before dependents.
+ * Uses Kahn's algorithm.
+ *
+ * @param streamIds - Streams to sort (must be a subset of all streams)
+ * @returns Sorted stream IDs (dependencies first)
+ * @throws CyclicDependencyError if graph has cycles
+ */
+export function topologicalSort(
+  db: Database.Database,
+  streamIds: string[]
+): string[] {
+  if (streamIds.length === 0) {
+    return [];
+  }
+
+  const streamSet = new Set(streamIds);
+
+  // Build in-degree map (count of dependencies within the set)
+  const inDegree: Record<string, number> = {};
+  const graph: Record<string, string[]> = {};
+
+  for (const sid of streamIds) {
+    inDegree[sid] = 0;
+    graph[sid] = [];
+  }
+
+  // Build the graph: for each stream, find its dependencies within the set
+  for (const sid of streamIds) {
+    const streamDeps = getDependencies(db, sid);
+    for (const dep of streamDeps) {
+      // Only count dependencies that are in our set
+      if (streamSet.has(dep) && graph[dep] !== undefined && inDegree[sid] !== undefined) {
+        graph[dep].push(sid); // dep -> sid edge (dep must come before sid)
+        inDegree[sid]++;
+      }
+    }
+  }
+
+  // Kahn's algorithm
+  const queue = streamIds.filter((s) => inDegree[s] === 0);
+  const result: string[] = [];
+
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    result.push(current);
+
+    const children = graph[current] ?? [];
+    for (const child of children) {
+      if (inDegree[child] !== undefined) {
+        inDegree[child]--;
+        if (inDegree[child] === 0) {
+          queue.push(child);
+        }
+      }
+    }
+  }
+
+  // Check for cycles
+  if (result.length !== streamIds.length) {
+    const remaining = streamIds.filter((s) => !result.includes(s));
+    throw new CyclicDependencyError(
+      `Dependency graph has cycles involving: ${remaining.join(', ')}`
+    );
+  }
+
+  return result;
 }

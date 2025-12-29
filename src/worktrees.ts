@@ -5,8 +5,16 @@
  */
 
 import type Database from 'better-sqlite3';
+import * as os from 'os';
+import * as path from 'path';
+import * as fs from 'fs';
 import { getTables } from './db/tables.js';
-import type { AgentWorktree, CreateWorktreeOptions } from './models/index.js';
+import type {
+  AgentWorktree,
+  CreateWorktreeOptions,
+  WorktreeProvider,
+  WorktreeProviderOptions,
+} from './models/index.js';
 import * as git from './git/index.js';
 import { WorktreeError } from './errors.js';
 
@@ -214,4 +222,130 @@ export function findStaleWorktrees(
     .all(cutoff) as Record<string, unknown>[];
 
   return rows.map(rowToWorktree);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Worktree Provider for Cascade Rebase
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Create a worktree provider for cascade rebase operations.
+ *
+ * @param repoPath - Path to the main repository
+ * @param options - Provider configuration
+ */
+export function createWorktreeProvider(
+  repoPath: string,
+  options: WorktreeProviderOptions
+): WorktreeProvider {
+  switch (options.mode) {
+    case 'callback':
+      return createCallbackProvider(options);
+    case 'temporary':
+      return createTemporaryProvider(repoPath, options);
+    case 'sequential':
+      return createSequentialProvider(repoPath, options);
+    default:
+      throw new WorktreeError(`Unknown worktree mode: ${options.mode}`);
+  }
+}
+
+/**
+ * Create a callback-based worktree provider.
+ * The caller provides a function to get the worktree path for each stream.
+ */
+function createCallbackProvider(options: WorktreeProviderOptions): WorktreeProvider {
+  if (!options.provider) {
+    throw new WorktreeError('Callback mode requires a provider function');
+  }
+
+  const providerFn = options.provider;
+
+  return {
+    getWorktree(streamId: string): string {
+      return providerFn(streamId);
+    },
+    cleanup(): void {
+      // Nothing to clean up - caller manages worktrees
+    },
+  };
+}
+
+/**
+ * Create a temporary worktree provider.
+ * Creates a new temporary worktree for each stream, cleans up when done.
+ */
+function createTemporaryProvider(
+  repoPath: string,
+  options: WorktreeProviderOptions
+): WorktreeProvider {
+  const tempDir = options.tempDir ?? os.tmpdir();
+  const createdWorktrees: string[] = [];
+
+  return {
+    getWorktree(streamId: string): string {
+      const branchName = `stream/${streamId}`;
+      const worktreePath = path.join(tempDir, `cascade-wt-${streamId}-${Date.now()}`);
+
+      // Create the temporary worktree
+      git.addWorktree(worktreePath, branchName, { cwd: repoPath });
+      createdWorktrees.push(worktreePath);
+
+      return worktreePath;
+    },
+    cleanup(): void {
+      // Remove all created worktrees
+      for (const wt of createdWorktrees) {
+        try {
+          git.removeWorktree(wt, true, { cwd: repoPath });
+        } catch {
+          // Best effort - worktree might already be gone
+        }
+        // Also try to remove the directory if it still exists
+        try {
+          if (fs.existsSync(wt)) {
+            fs.rmSync(wt, { recursive: true, force: true });
+          }
+        } catch {
+          // Ignore cleanup errors
+        }
+      }
+      createdWorktrees.length = 0;
+
+      // Prune stale worktree references
+      try {
+        git.pruneWorktrees({ cwd: repoPath });
+      } catch {
+        // Ignore prune errors
+      }
+    },
+  };
+}
+
+/**
+ * Create a sequential worktree provider.
+ * Reuses a single worktree, checking out each stream in turn.
+ */
+function createSequentialProvider(
+  _repoPath: string,
+  options: WorktreeProviderOptions
+): WorktreeProvider {
+  const worktreePath = options.worktreePath;
+  if (!worktreePath) {
+    throw new WorktreeError('Sequential mode requires a worktreePath');
+  }
+
+  return {
+    getWorktree(streamId: string): string {
+      const branchName = `stream/${streamId}`;
+
+      // Checkout the stream branch in the existing worktree
+      git.checkout(branchName, { cwd: worktreePath });
+
+      return worktreePath;
+    },
+    cleanup(): void {
+      // Nothing to clean up - worktree is managed by caller
+    },
+  };
 }

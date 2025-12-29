@@ -101,6 +101,26 @@ export class CyclicDependencyError extends Error {
 }
 
 /**
+ * Stream has diamond dependency (multiple parents).
+ * Thrown during cascade rebase when merge-based streams are detected.
+ */
+export class DiamondDependencyError extends Error {
+  streamId: string;
+  parents: string[];
+  parentHeads: string[];
+
+  constructor(streamId: string, parents: string[], parentHeads: string[]) {
+    super(
+      `Stream ${streamId} has diamond dependency on [${parents.join(', ')}] - requires manual resolution`
+    );
+    this.name = 'DiamondDependencyError';
+    this.streamId = streamId;
+    this.parents = parents;
+    this.parentHeads = parentHeads;
+  }
+}
+
+/**
  * Database and git state are out of sync.
  */
 export class DesyncError extends Error {

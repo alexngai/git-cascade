@@ -21,6 +21,7 @@ import * as git from './git/index.js';
 import * as stacks from './stacks.js';
 import * as deps from './dependencies.js';
 import * as changes from './changes.js';
+import * as cascade from './cascade.js';
 import { StreamNotFoundError, BranchNotFoundError } from './errors.js';
 
 /**
@@ -219,12 +220,17 @@ export function forkStream(
   const baseCommit = git.resolveRef(parentBranch, { cwd: repoPath });
 
   // Create new stream with parent reference
-  return createStream(db, repoPath, {
+  const newStreamId = createStream(db, repoPath, {
     name: options.name,
     agentId: options.agentId,
     base: baseCommit,
     parentStream: parent.id,
   });
+
+  // Add fork dependency for cascade rebase
+  deps.addForkDependency(db, newStreamId, parent.id);
+
+  return newStreamId;
 }
 
 /**
@@ -316,14 +322,16 @@ export function getStreamHead(repoPath: string, streamId: string): string {
  * 1. Rebases source stream's commits onto target stream's head
  * 2. Updates source stream's baseCommit to target's head
  * 3. If enableStackedReview=true, rebuilds the stack
+ * 4. If cascade=true (default), triggers cascade rebase for dependents
  */
 export function rebaseOntoStream(
   db: Database.Database,
-  _repoPath: string,
+  repoPath: string,
   options: RebaseOntoStreamOptions
 ): RebaseResult {
-  const { sourceStream, targetStream, worktree } = options;
+  const { sourceStream, targetStream, worktree, agentId } = options;
   const onConflict = options.onConflict ?? 'abort';
+  const shouldCascade = options.cascade !== false; // Default true
 
   // Validate streams exist
   const source = getStreamOrThrow(db, sourceStream);
@@ -343,11 +351,19 @@ export function rebaseOntoStream(
     updateBaseCommit(db, sourceStream, targetHead);
     git.checkout(sourceBranch, gitOpts);
     git.resetHard(targetHead, gitOpts);
-    return {
+
+    const baseResult: RebaseResult = {
       success: true,
       newHead: targetHead,
       newBaseCommit: targetHead,
     };
+
+    // Trigger cascade if enabled
+    if (shouldCascade) {
+      baseResult.cascadeResult = triggerCascade(db, repoPath, sourceStream, agentId, worktree);
+    }
+
+    return baseResult;
   }
 
   // Handle manual strategy - just fail if conflicts might occur
@@ -377,11 +393,19 @@ export function rebaseOntoStream(
     const newCommits = git.getCommitRange(targetHead, sourceBranch, gitOpts);
     const commitMapping = changes.buildRebaseCommitMapping(worktree, commits, newCommits);
     changes.rebuildChangesAfterRebase(db, sourceStream, commitMapping);
-    return {
+
+    const manualResult: RebaseResult = {
       success: true,
       newHead: result.newHead,
       newBaseCommit: targetHead,
     };
+
+    // Trigger cascade if enabled
+    if (shouldCascade) {
+      manualResult.cascadeResult = triggerCascade(db, repoPath, sourceStream, agentId, worktree);
+    }
+
+    return manualResult;
   }
 
   // Handle agent strategy (deferred to Phase 6)
@@ -427,11 +451,52 @@ export function rebaseOntoStream(
   const commitMapping = changes.buildRebaseCommitMapping(worktree, commits, newCommits);
   changes.rebuildChangesAfterRebase(db, sourceStream, commitMapping);
 
-  return {
+  const finalResult: RebaseResult = {
     success: true,
     newHead: result.newHead,
     newBaseCommit: targetHead,
   };
+
+  // Trigger cascade if enabled
+  if (shouldCascade) {
+    finalResult.cascadeResult = triggerCascade(db, repoPath, sourceStream, agentId, worktree);
+  }
+
+  return finalResult;
+}
+
+/**
+ * Trigger cascade rebase for dependents of a stream.
+ */
+function triggerCascade(
+  db: Database.Database,
+  repoPath: string,
+  rootStream: string,
+  agentId: string,
+  worktree: string
+): import('./models/index.js').CascadeResult {
+  // Check if there are any dependents
+  const dependents = deps.getAllDependents(db, rootStream);
+  if (dependents.length === 0) {
+    return {
+      success: true,
+      updated: [],
+      failed: [],
+      skipped: [],
+      results: {},
+    };
+  }
+
+  // Use sequential mode with the same worktree
+  return cascade.cascadeRebase(db, repoPath, {
+    rootStream,
+    agentId,
+    worktree: {
+      mode: 'sequential',
+      worktreePath: worktree,
+    },
+    strategy: 'stop_on_conflict',
+  });
 }
 
 /**
