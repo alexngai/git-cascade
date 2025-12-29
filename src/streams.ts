@@ -20,6 +20,7 @@ import type {
 import * as git from './git/index.js';
 import * as stacks from './stacks.js';
 import * as deps from './dependencies.js';
+import * as changes from './changes.js';
 import { StreamNotFoundError, BranchNotFoundError } from './errors.js';
 
 /**
@@ -271,6 +272,12 @@ export function mergeStream(
       WHERE id = ?
     `).run(options.targetStream, now, source.id);
 
+    // Mark all changes in source stream as merged
+    const sourceChanges = changes.getChangesForStream(db, source.id, { status: 'active' });
+    if (sourceChanges.length > 0) {
+      changes.markMerged(db, sourceChanges.map((c) => c.id));
+    }
+
     return { success: true, newHead };
   } catch (error) {
     // Check for conflicts
@@ -366,6 +373,10 @@ export function rebaseOntoStream(
     if (source.enableStackedReview) {
       stacks.rebuildStack(db, worktree, sourceStream);
     }
+    // Rebuild change tracking
+    const newCommits = git.getCommitRange(targetHead, sourceBranch, gitOpts);
+    const commitMapping = changes.buildRebaseCommitMapping(worktree, commits, newCommits);
+    changes.rebuildChangesAfterRebase(db, sourceStream, commitMapping);
     return {
       success: true,
       newHead: result.newHead,
@@ -410,6 +421,11 @@ export function rebaseOntoStream(
   if (source.enableStackedReview) {
     stacks.rebuildStack(db, worktree, sourceStream);
   }
+
+  // Rebuild change tracking
+  const newCommits = git.getCommitRange(targetHead, sourceBranch, gitOpts);
+  const commitMapping = changes.buildRebaseCommitMapping(worktree, commits, newCommits);
+  changes.rebuildChangesAfterRebase(db, sourceStream, commitMapping);
 
   return {
     success: true,

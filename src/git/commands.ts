@@ -5,6 +5,7 @@
  */
 
 import { execSync, ExecSyncOptions } from 'child_process';
+import * as crypto from 'crypto';
 import { GitOperationError, BranchNotFoundError } from '../errors.js';
 
 export interface GitOptions {
@@ -534,4 +535,139 @@ export function isRebaseInProgress(options: GitOptions): boolean {
   } catch {
     return false;
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Change-Id Operations (Gerrit-style commit message trailers)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Generate a new Change-Id.
+ *
+ * Format: c-xxxxxxxx (8 hex characters from UUID)
+ */
+export function generateChangeId(): string {
+  return `c-${crypto.randomUUID().slice(0, 8)}`;
+}
+
+/**
+ * Extract Change-Id from a commit message.
+ *
+ * Looks for a trailer line in the format: "Change-Id: c-xxxxxxxx"
+ * Searches from the end of the message (trailers are at the bottom).
+ *
+ * @param commitMsg - The full commit message
+ * @returns The Change-Id if found, null otherwise
+ */
+export function extractChangeId(commitMsg: string): string | null {
+  const lines = commitMsg.trim().split('\n').reverse();
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('Change-Id: ')) {
+      return trimmed.slice(11).trim(); // Remove "Change-Id: " prefix
+    }
+    // Stop searching if we hit a non-trailer line (empty line or doesn't look like a trailer)
+    if (trimmed === '' || (!trimmed.includes(': ') && !trimmed.startsWith('Change-Id:'))) {
+      // Continue searching - trailers can have blank lines between them
+      continue;
+    }
+  }
+  return null;
+}
+
+/**
+ * Ensure a commit message has a Change-Id trailer.
+ *
+ * If the message already has a Change-Id, returns it unchanged.
+ * Otherwise, appends a new Change-Id trailer.
+ *
+ * @param commitMsg - The commit message
+ * @returns The commit message with a Change-Id trailer
+ */
+export function ensureChangeId(commitMsg: string): string {
+  const existingId = extractChangeId(commitMsg);
+  if (existingId) {
+    return commitMsg;
+  }
+
+  const changeId = generateChangeId();
+  const trimmed = commitMsg.trimEnd();
+
+  // Check if message already ends with trailers (has a blank line followed by key: value lines)
+  const lines = trimmed.split('\n');
+  const lastNonEmptyIdx = lines.length - 1;
+
+  // Find if there's already a trailer section
+  let hasTrailerSection = false;
+  for (let i = lastNonEmptyIdx; i >= 0; i--) {
+    const line = lines[i];
+    if (!line) continue;
+    const trimmedLine = line.trim();
+    if (trimmedLine === '') {
+      hasTrailerSection = true;
+      break;
+    }
+    if (!trimmedLine.includes(': ')) {
+      // Not a trailer line, so no trailer section yet
+      break;
+    }
+    hasTrailerSection = true;
+  }
+
+  if (hasTrailerSection) {
+    // Append to existing trailer section
+    return `${trimmed}\nChange-Id: ${changeId}`;
+  } else {
+    // Add new trailer section with blank line
+    return `${trimmed}\n\nChange-Id: ${changeId}`;
+  }
+}
+
+/**
+ * Get the Change-Id from a commit.
+ *
+ * Convenience function that fetches the commit message and extracts the Change-Id.
+ *
+ * @param commit - The commit hash
+ * @param options - Git options
+ * @returns The Change-Id if found, null otherwise
+ */
+export function getCommitChangeId(commit: string, options: GitOptions): string | null {
+  const message = getCommitMessage(commit, options);
+  return extractChangeId(message);
+}
+
+/**
+ * Result of a commit with Change-Id.
+ */
+export interface CommitWithChangeIdResult {
+  /** The commit hash */
+  commit: string;
+  /** The Change-Id (from trailer) */
+  changeId: string;
+}
+
+/**
+ * Create a commit with a Change-Id trailer.
+ *
+ * Ensures the commit message has a Change-Id trailer, creates the commit,
+ * and returns both the commit hash and Change-Id.
+ *
+ * @param message - The commit message
+ * @param options - Git options
+ * @returns The commit hash and Change-Id
+ */
+export function commitWithChangeId(
+  message: string,
+  options: GitOptions
+): CommitWithChangeIdResult {
+  // Ensure message has Change-Id
+  const messageWithId = ensureChangeId(message);
+  const changeId = extractChangeId(messageWithId)!;
+
+  // Create the commit
+  git(['commit', '-m', messageWithId], options);
+  const commitHash = getHead(options);
+
+  return { commit: commitHash, changeId };
 }

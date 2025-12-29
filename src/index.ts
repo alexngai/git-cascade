@@ -26,5 +26,8 @@ export * as dependencies from './dependencies.js';
 // Stream operations (low-level API)
 export * as streams from './streams.js';
 
+// Change tracking (low-level API)
+export * as changes from './changes.js';
+
 // Errors
 export * from './errors.js';

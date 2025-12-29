@@ -65,13 +65,17 @@ function rowToReviewBlock(row: Record<string, unknown>): Omit<ReviewBlock, 'comm
  * Convert database row to StackEntry object.
  */
 function rowToStackEntry(row: Record<string, unknown>): StackEntry {
-  return {
+  const entry: StackEntry = {
     id: row.id as string,
     reviewBlockId: row.review_block_id as string,
     commitHash: row.commit_hash as string,
     commitPosition: row.commit_position as number,
     originalCommit: row.original_commit as string,
   };
+  if (row.change_id) {
+    entry.changeId = row.change_id as string;
+  }
+  return entry;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -121,11 +125,19 @@ export function createReviewBlock(
     // Insert stack entries for each commit
     for (let i = 0; i < commits.length; i++) {
       const entryId = generateStackEntryId();
+      const commit = commits[i];
+
+      // Look up change_id from changes table
+      const changeRow = db.prepare(`
+        SELECT id FROM ${t.changes} WHERE current_commit = ?
+      `).get(commit) as { id: string } | undefined;
+      const changeId = changeRow?.id ?? null;
+
       db.prepare(`
         INSERT INTO ${t.stack_entries} (
-          id, review_block_id, commit_hash, commit_position, original_commit
-        ) VALUES (?, ?, ?, ?, ?)
-      `).run(entryId, blockId, commits[i], i, commits[i]);
+          id, review_block_id, commit_hash, commit_position, original_commit, change_id
+        ) VALUES (?, ?, ?, ?, ?, ?)
+      `).run(entryId, blockId, commit, i, commit, changeId);
     }
   })();
 
@@ -447,12 +459,18 @@ export function rebuildStack(
           const newCommit = patchIdToCommit.get(originalPatchId);
 
           if (newCommit) {
-            // Update commit hash
+            // Look up change_id from changes table
+            const changeRow = db.prepare(`
+              SELECT id FROM ${t.changes} WHERE current_commit = ?
+            `).get(newCommit) as { id: string } | undefined;
+            const changeId = changeRow?.id ?? null;
+
+            // Update commit hash and change_id
             db.prepare(`
               UPDATE ${t.stack_entries}
-              SET commit_hash = ?
+              SET commit_hash = ?, change_id = ?
               WHERE id = ?
-            `).run(newCommit, entry.id);
+            `).run(newCommit, changeId, entry.id);
             remainingEntries++;
           } else {
             // Commit was squashed/dropped - delete entry
@@ -553,12 +571,18 @@ function autoPopulateUntrackedInTransaction(
         ) VALUES (?, ?, ?, ?, ?, NULL, 'draft', ?, ?)
       `).run(blockId, streamId, stackName, nextPosition, title, now, now);
 
+      // Look up change_id from changes table
+      const changeRow = db.prepare(`
+        SELECT id FROM ${t.changes} WHERE current_commit = ?
+      `).get(commit) as { id: string } | undefined;
+      const changeId = changeRow?.id ?? null;
+
       const entryId = generateStackEntryId();
       db.prepare(`
         INSERT INTO ${t.stack_entries} (
-          id, review_block_id, commit_hash, commit_position, original_commit
-        ) VALUES (?, ?, ?, 0, ?)
-      `).run(entryId, blockId, commit, commit);
+          id, review_block_id, commit_hash, commit_position, original_commit, change_id
+        ) VALUES (?, ?, ?, 0, ?, ?)
+      `).run(entryId, blockId, commit, commit, changeId);
 
       nextPosition++;
     }
@@ -600,12 +624,18 @@ export function addCommitsToBlock(
 
   db.transaction(() => {
     for (const commit of commits) {
+      // Look up change_id from changes table
+      const changeRow = db.prepare(`
+        SELECT id FROM ${t.changes} WHERE current_commit = ?
+      `).get(commit) as { id: string } | undefined;
+      const changeId = changeRow?.id ?? null;
+
       const entryId = generateStackEntryId();
       db.prepare(`
         INSERT INTO ${t.stack_entries} (
-          id, review_block_id, commit_hash, commit_position, original_commit
-        ) VALUES (?, ?, ?, ?, ?)
-      `).run(entryId, reviewBlockId, commit, nextPosition, commit);
+          id, review_block_id, commit_hash, commit_position, original_commit, change_id
+        ) VALUES (?, ?, ?, ?, ?, ?)
+      `).run(entryId, reviewBlockId, commit, nextPosition, commit, changeId);
       nextPosition++;
     }
 

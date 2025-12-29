@@ -53,6 +53,8 @@ export interface StackEntry {
   commitPosition: number;
   /** Original commit hash for tracking across rebases (via patch-id) */
   originalCommit: string;
+  /** Optional Change-Id for logical change tracking */
+  changeId?: string;
 }
 
 /**

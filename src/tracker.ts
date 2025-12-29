@@ -13,6 +13,8 @@ import * as worktrees from './worktrees.js';
 import * as rollback from './rollback.js';
 import * as stacks from './stacks.js';
 import * as deps from './dependencies.js';
+import * as changes from './changes.js';
+import * as git from './git/index.js';
 import type {
   Stream,
   StreamStatus,
@@ -32,6 +34,9 @@ import type {
   RebaseResult,
   ConflictStrategy,
   StreamNode,
+  Change,
+  ChangeStatus,
+  CreateChangeOptions,
 } from './models/index.js';
 import type {
   RollbackToOperationOptions,
@@ -333,5 +338,105 @@ export class MultiAgentRepoTracker {
 
   getStreamGraph(rootStreamId?: string): StreamNode | StreamNode[] {
     return streams.getStreamGraph(this.db, rootStreamId);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Change Tracking
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  createChange(options: CreateChangeOptions): string {
+    return changes.createChange(this.db, options);
+  }
+
+  getChange(changeId: string): Change | null {
+    return changes.getChange(this.db, changeId);
+  }
+
+  getChangeByCommit(commit: string): Change | null {
+    return changes.getChangeByCommit(this.db, commit);
+  }
+
+  getChangeByHistoricalCommit(commit: string): Change | null {
+    return changes.getChangeByHistoricalCommit(this.db, commit);
+  }
+
+  getChangesForStream(
+    streamId: string,
+    options?: { status?: ChangeStatus }
+  ): Change[] {
+    return changes.getChangesForStream(this.db, streamId, options);
+  }
+
+  recordSquash(
+    absorbedIds: string[],
+    targetId: string,
+    resultCommit: string
+  ): void {
+    changes.recordSquash(this.db, absorbedIds, targetId, resultCommit);
+  }
+
+  recordSplit(
+    originalId: string,
+    streamId: string,
+    newCommits: Array<{ commit: string; description: string }>
+  ): string[] {
+    return changes.recordSplit(this.db, originalId, streamId, newCommits);
+  }
+
+  markChangesMerged(changeIds: string[]): void {
+    changes.markMerged(this.db, changeIds);
+  }
+
+  markChangeDropped(changeId: string): void {
+    changes.markDropped(this.db, changeId);
+  }
+
+  /**
+   * Commit changes in a worktree with automatic Change tracking.
+   *
+   * This method:
+   * 1. Stages all changes
+   * 2. Creates a commit with a Change-Id trailer
+   * 3. Creates a Change entry in the database
+   * 4. Records the operation
+   *
+   * @returns The commit hash and change ID
+   */
+  commitChanges(options: {
+    streamId: string;
+    agentId: string;
+    worktree: string;
+    message: string;
+  }): { commit: string; changeId: string } {
+    const gitOpts = { cwd: options.worktree };
+
+    // Stage all changes
+    git.stageAll(gitOpts);
+
+    // Commit with Change-Id
+    const result = git.commitWithChangeId(options.message, gitOpts);
+
+    // Extract description (first line of message)
+    const description = options.message.split('\n')[0] || options.message;
+
+    // Create Change entry
+    changes.createChange(this.db, {
+      streamId: options.streamId,
+      commit: result.commit,
+      description,
+      changeId: result.changeId,
+    });
+
+    // Record operation
+    this.recordOperation({
+      streamId: options.streamId,
+      agentId: options.agentId,
+      opType: 'commit',
+      beforeState: git.resolveRef('HEAD~1', gitOpts),
+      afterState: result.commit,
+      metadata: { changeId: result.changeId },
+    });
+
+    return result;
   }
 }

@@ -109,6 +109,7 @@ function initializeSchema(db: Database.Database, prefix: string): void {
       commit_hash TEXT NOT NULL,
       commit_position INTEGER NOT NULL,
       original_commit TEXT NOT NULL,
+      change_id TEXT,
       FOREIGN KEY (review_block_id) REFERENCES ${prefix}review_blocks(id) ON DELETE CASCADE
     );
 
@@ -223,6 +224,7 @@ function initializeSchema(db: Database.Database, prefix: string): void {
     CREATE INDEX IF NOT EXISTS ${prefix}idx_stack_entries_block ON ${prefix}stack_entries(review_block_id);
     CREATE INDEX IF NOT EXISTS ${prefix}idx_stack_entries_commit ON ${prefix}stack_entries(commit_hash);
     CREATE INDEX IF NOT EXISTS ${prefix}idx_stack_entries_original ON ${prefix}stack_entries(original_commit);
+    CREATE INDEX IF NOT EXISTS ${prefix}idx_stack_entries_change ON ${prefix}stack_entries(change_id);
     CREATE INDEX IF NOT EXISTS ${prefix}idx_changes_stream ON ${prefix}changes(stream_id);
     CREATE INDEX IF NOT EXISTS ${prefix}idx_changes_current_commit ON ${prefix}changes(current_commit);
     CREATE INDEX IF NOT EXISTS ${prefix}idx_conflicts_stream ON ${prefix}conflicts(stream_id);
