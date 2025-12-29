@@ -29,5 +29,8 @@ export * as streams from './streams.js';
 // Change tracking (low-level API)
 export * as changes from './changes.js';
 
+// Conflict tracking (low-level API)
+export * as conflicts from './conflicts.js';
+
 // Errors
 export * from './errors.js';

@@ -4,7 +4,7 @@
  * A Stream is a logical unit of work that maps 1:1 to a git branch.
  */
 
-export type StreamStatus = 'active' | 'paused' | 'merged' | 'abandoned';
+export type StreamStatus = 'active' | 'paused' | 'merged' | 'abandoned' | 'conflicted';
 
 export interface Stream {
   /** Unique identifier (e.g., "abc12345") */
@@ -115,6 +115,8 @@ export interface RebaseOntoStreamOptions {
   onConflict?: ConflictStrategy;
   /** Handler for agent-based conflict resolution */
   conflictHandler?: ConflictHandler;
+  /** Timeout for conflict handler in ms (default: 300000 = 5 min) */
+  conflictTimeout?: number;
   /**
    * Cascade rebase to dependent streams (default: true).
    * Set to false to disable automatic cascade.
@@ -134,6 +136,8 @@ export interface RebaseResult {
   newBaseCommit?: string;
   /** Conflict information if rebase failed due to conflicts */
   conflicts?: ConflictInfo[];
+  /** Conflict record ID if conflict was recorded */
+  conflictId?: string;
   /** Error message if rebase failed */
   error?: string;
   /** Result of cascade rebase (if cascade was enabled) */

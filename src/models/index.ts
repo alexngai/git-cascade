@@ -8,3 +8,4 @@ export * from './worktree.js';
 export * from './stack.js';
 export * from './change.js';
 export * from './dependency.js';
+export * from './conflict.js';

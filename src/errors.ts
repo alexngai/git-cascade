@@ -151,3 +151,44 @@ export class LockError extends Error {
     this.heldBy = heldBy;
   }
 }
+
+/**
+ * Stream is in conflicted state and operation is blocked.
+ */
+export class StreamConflictedError extends Error {
+  streamId: string;
+  conflictId?: string;
+
+  constructor(streamId: string, conflictId?: string) {
+    super(
+      `Stream ${streamId} is in conflicted state - resolve conflict before proceeding`
+    );
+    this.name = 'StreamConflictedError';
+    this.streamId = streamId;
+    this.conflictId = conflictId;
+  }
+}
+
+/**
+ * Conflict resolution failed.
+ */
+export class ConflictResolutionError extends Error {
+  conflictId: string;
+  reason: 'timeout' | 'handler_failed' | 'verification_failed' | 'partial_resolution';
+
+  constructor(
+    conflictId: string,
+    reason: 'timeout' | 'handler_failed' | 'verification_failed' | 'partial_resolution'
+  ) {
+    const messages = {
+      timeout: 'Conflict resolution timed out',
+      handler_failed: 'Conflict handler returned failure',
+      verification_failed: 'Conflict resolution verification failed',
+      partial_resolution: 'Only partial conflict resolution - some files remain conflicted',
+    };
+    super(`${messages[reason]} for conflict ${conflictId}`);
+    this.name = 'ConflictResolutionError';
+    this.conflictId = conflictId;
+    this.reason = reason;
+  }
+}

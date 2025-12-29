@@ -64,10 +64,8 @@ export interface WorktreeProvider {
  */
 export type CascadeStrategy =
   | 'stop_on_conflict'   // Stop entire cascade at first conflict
-  | 'skip_conflicting';  // Skip streams that would conflict, continue others
-  // Future (Phase 6):
-  // | 'defer_conflicts'    // Continue with conflict markers
-  // | 'interactive';       // Call handler for each conflict
+  | 'skip_conflicting'   // Skip streams that would conflict, continue others
+  | 'defer_conflicts';   // Record conflict, mark stream conflicted, skip dependents, continue others
 
 /**
  * Options for cascade rebase.
@@ -77,6 +75,10 @@ export interface CascadeOptions {
   strategy?: CascadeStrategy;
   /** Worktree provider options */
   worktree?: WorktreeProviderOptions;
+  /** Per-stream conflict handlers (for defer_conflicts strategy with agent resolution) */
+  conflictHandlers?: Map<string, import('./stream.js').ConflictHandler>;
+  /** Timeout for conflict handlers in ms (default: 300000 = 5 min) */
+  conflictTimeout?: number;
 }
 
 /**
@@ -93,4 +95,8 @@ export interface CascadeResult {
   skipped: string[];
   /** Per-stream rebase results */
   results: Record<string, RebaseResult>;
+  /** Streams with deferred conflicts (defer_conflicts strategy) */
+  deferred?: string[];
+  /** Map of stream ID to conflict record ID (for deferred conflicts) */
+  conflictRecords?: Record<string, string>;
 }

@@ -43,6 +43,7 @@ import type {
   RollbackNOptions,
   RollbackToForkPointOptions,
 } from './rollback.js';
+import { StreamConflictedError } from './errors.js';
 
 export interface TrackerOptions {
   /** Path to the git repository */
@@ -86,6 +87,10 @@ export class MultiAgentRepoTracker {
 
     // Register table names for this database instance
     registerTables(this.db, this.tables);
+
+    // Recover orphaned conflicts from any previous crash
+    // This cleans up stale 'in_progress' conflicts older than 1 hour
+    streams.recoverOrphanedConflicts(this.db);
   }
 
   /**
@@ -408,6 +413,13 @@ export class MultiAgentRepoTracker {
     worktree: string;
     message: string;
   }): { commit: string; changeId: string } {
+    // Block if stream is conflicted
+    const stream = this.getStream(options.streamId);
+    if (stream?.status === 'conflicted') {
+      const conflictId = (stream.metadata as { conflictId?: string }).conflictId;
+      throw new StreamConflictedError(options.streamId, conflictId);
+    }
+
     const gitOpts = { cwd: options.worktree };
 
     // Stage all changes

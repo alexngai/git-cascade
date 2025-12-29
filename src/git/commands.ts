@@ -245,6 +245,87 @@ export function mergeAbort(options: GitOptions): void {
   git(['merge', '--abort'], options);
 }
 
+/**
+ * Check if a rebase is in progress.
+ */
+export function isRebaseInProgress(options: GitOptions): boolean {
+  const gitDir = git(['rev-parse', '--git-dir'], options).trim();
+  const rebaseDir = `${options.cwd}/${gitDir}/rebase-merge`;
+  const rebaseApplyDir = `${options.cwd}/${gitDir}/rebase-apply`;
+
+  try {
+    // Check for rebase-merge (interactive) or rebase-apply (standard)
+    const fs = require('fs');
+    return fs.existsSync(rebaseDir) || fs.existsSync(rebaseApplyDir);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Get rebase state information.
+ */
+export function getRebaseState(
+  options: GitOptions
+): { onto: string; head: string; step: number; total: number } | null {
+  if (!isRebaseInProgress(options)) {
+    return null;
+  }
+
+  const gitDir = git(['rev-parse', '--git-dir'], options).trim();
+  const fs = require('fs');
+  const path = require('path');
+
+  // Try rebase-merge first (interactive rebase)
+  const rebaseMergeDir = path.join(options.cwd, gitDir, 'rebase-merge');
+  if (fs.existsSync(rebaseMergeDir)) {
+    try {
+      const onto = fs.readFileSync(path.join(rebaseMergeDir, 'onto'), 'utf8').trim();
+      const head = fs.readFileSync(path.join(rebaseMergeDir, 'head-name'), 'utf8').trim();
+      const msgnum = parseInt(fs.readFileSync(path.join(rebaseMergeDir, 'msgnum'), 'utf8').trim(), 10);
+      const end = parseInt(fs.readFileSync(path.join(rebaseMergeDir, 'end'), 'utf8').trim(), 10);
+      return { onto, head, step: msgnum, total: end };
+    } catch {
+      return null;
+    }
+  }
+
+  // Try rebase-apply (standard rebase)
+  const rebaseApplyDir = path.join(options.cwd, gitDir, 'rebase-apply');
+  if (fs.existsSync(rebaseApplyDir)) {
+    try {
+      const onto = fs.readFileSync(path.join(rebaseApplyDir, 'onto'), 'utf8').trim();
+      const head = fs.readFileSync(path.join(rebaseApplyDir, 'head-name'), 'utf8').trim();
+      const next = parseInt(fs.readFileSync(path.join(rebaseApplyDir, 'next'), 'utf8').trim(), 10);
+      const last = parseInt(fs.readFileSync(path.join(rebaseApplyDir, 'last'), 'utf8').trim(), 10);
+      return { onto, head, step: next, total: last };
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Continue a rebase after resolving conflicts.
+ */
+export function rebaseContinue(options: GitOptions): RebaseOntoResult {
+  try {
+    git(['rebase', '--continue'], options);
+    return { success: true, newHead: getHead(options) };
+  } catch (error) {
+    const conflicts = getConflictedFiles(options);
+    if (conflicts.length > 0) {
+      return { success: false, conflicts };
+    }
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Worktree Operations
 // ─────────────────────────────────────────────────────────────────────────────
@@ -474,11 +555,12 @@ export function rebaseOntoWithStrategy(
   const args = ['rebase', '--onto', newBase, upstream];
 
   if (strategy === 'ours') {
-    // Note: In git rebase, --ours means keep the changes from the branch being rebased
-    // This is counterintuitive but correct
-    args.push('--strategy=recursive', '--strategy-option=ours');
-  } else if (strategy === 'theirs') {
+    // In git rebase, "ours" is the target we're rebasing onto, "theirs" is the commit being replayed
+    // Our API: 'ours' = keep source stream's changes = git's "theirs" during rebase
     args.push('--strategy=recursive', '--strategy-option=theirs');
+  } else if (strategy === 'theirs') {
+    // Our API: 'theirs' = keep target stream's changes = git's "ours" during rebase
+    args.push('--strategy=recursive', '--strategy-option=ours');
   }
 
   try {
@@ -507,34 +589,10 @@ export function rebaseOntoWithStrategy(
 }
 
 /**
- * Continue a rebase after resolving conflicts.
- */
-export function rebaseContinue(options: GitOptions): void {
-  git(['rebase', '--continue'], options);
-}
-
-/**
  * Skip the current commit during rebase.
  */
 export function rebaseSkip(options: GitOptions): void {
   git(['rebase', '--skip'], options);
-}
-
-/**
- * Check if a rebase is in progress.
- */
-export function isRebaseInProgress(options: GitOptions): boolean {
-  try {
-    // Check for .git/rebase-merge or .git/rebase-apply directories
-    const gitDir = git(['rev-parse', '--git-dir'], options);
-    const fs = require('fs');
-    const path = require('path');
-    const rebaseMerge = path.join(options.cwd, gitDir, 'rebase-merge');
-    const rebaseApply = path.join(options.cwd, gitDir, 'rebase-apply');
-    return fs.existsSync(rebaseMerge) || fs.existsSync(rebaseApply);
-  } catch {
-    return false;
-  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
