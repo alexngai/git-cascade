@@ -429,4 +429,163 @@ Signed-off-by: Test User`;
       expect(change!.status).toBe('merged');
     });
   });
+
+  describe('Edge Cases', () => {
+    it('should return null when change not found', () => {
+      const change = tracker.getChange('nonexistent-id');
+      expect(change).toBeNull();
+    });
+
+    it('should return null when commit not found', () => {
+      const change = tracker.getChangeByCommit('nonexistent-commit');
+      expect(change).toBeNull();
+    });
+
+    it('should return null when historical commit not found', () => {
+      const change = tracker.getChangeByHistoricalCommit('nonexistent-commit');
+      expect(change).toBeNull();
+    });
+
+    it('should filter changes by status', () => {
+      const streamId = tracker.createStream({
+        name: 'test-stream',
+        agentId: 'agent-1',
+      });
+
+      git.checkout(`stream/${streamId}`, { cwd: testRepo.path });
+
+      // Create multiple commits
+      fs.writeFileSync(path.join(testRepo.path, 'file1.txt'), 'content1');
+      git.stageAll({ cwd: testRepo.path });
+      const commit1 = git.commit('commit 1', { cwd: testRepo.path });
+      const change1 = tracker.createChange({ streamId, commit: commit1, description: 'commit 1' });
+
+      fs.writeFileSync(path.join(testRepo.path, 'file2.txt'), 'content2');
+      git.stageAll({ cwd: testRepo.path });
+      const commit2 = git.commit('commit 2', { cwd: testRepo.path });
+      const change2 = tracker.createChange({ streamId, commit: commit2, description: 'commit 2' });
+
+      // Drop one change
+      tracker.markChangeDropped(change1);
+
+      // Filter by active status
+      const activeChanges = tracker.getChangesForStream(streamId, { status: 'active' });
+      expect(activeChanges).toHaveLength(1);
+      expect(activeChanges[0].id).toBe(change2);
+
+      // Filter by dropped status
+      const droppedChanges = tracker.getChangesForStream(streamId, { status: 'dropped' });
+      expect(droppedChanges).toHaveLength(1);
+      expect(droppedChanges[0].id).toBe(change1);
+    });
+
+    it('should get active changes helper', () => {
+      const streamId = tracker.createStream({
+        name: 'test-stream',
+        agentId: 'agent-1',
+      });
+
+      git.checkout(`stream/${streamId}`, { cwd: testRepo.path });
+
+      // Create two commits
+      fs.writeFileSync(path.join(testRepo.path, 'file1.txt'), 'content1');
+      git.stageAll({ cwd: testRepo.path });
+      const commit1 = git.commit('commit 1', { cwd: testRepo.path });
+      const change1 = tracker.createChange({ streamId, commit: commit1, description: 'commit 1' });
+
+      fs.writeFileSync(path.join(testRepo.path, 'file2.txt'), 'content2');
+      git.stageAll({ cwd: testRepo.path });
+      const commit2 = git.commit('commit 2', { cwd: testRepo.path });
+      tracker.createChange({ streamId, commit: commit2, description: 'commit 2' });
+
+      // Mark one as merged
+      tracker.markChangesMerged([change1]);
+
+      // Get active changes (should only have 1)
+      const activeChanges = changes.getActiveChanges(tracker.db, streamId);
+      expect(activeChanges).toHaveLength(1);
+      expect(activeChanges[0].description).toBe('commit 2');
+    });
+
+    it('should throw when recording rewrite for nonexistent change', () => {
+      expect(() => {
+        changes.recordRewrite(tracker.db, 'nonexistent', 'newcommit', 'rebase');
+      }).toThrow('Change not found: nonexistent');
+    });
+
+    it('should record multiple rewrites in history', () => {
+      const streamId = tracker.createStream({
+        name: 'test-stream',
+        agentId: 'agent-1',
+      });
+
+      git.checkout(`stream/${streamId}`, { cwd: testRepo.path });
+      fs.writeFileSync(path.join(testRepo.path, 'test.txt'), 'content');
+      git.stageAll({ cwd: testRepo.path });
+      const commit = git.commit('test commit', { cwd: testRepo.path });
+
+      const changeId = tracker.createChange({
+        streamId,
+        commit,
+        description: 'test commit',
+      });
+
+      // Record multiple rewrites
+      changes.recordRewrite(tracker.db, changeId, 'rebase1', 'rebase');
+      changes.recordRewrite(tracker.db, changeId, 'amend1', 'amend');
+      changes.recordRewrite(tracker.db, changeId, 'rebase2', 'rebase');
+
+      const change = tracker.getChange(changeId);
+      expect(change!.commitHistory).toHaveLength(4); // initial + 3 rewrites
+      expect(change!.commitHistory[0].reason).toBe('rebase');
+      expect(change!.commitHistory[1].reason).toBe('amend');
+      expect(change!.commitHistory[2].reason).toBe('rebase');
+      expect(change!.commitHistory[3].reason).toBe('initial');
+      expect(change!.currentCommit).toBe('rebase2');
+    });
+
+    it('should handle empty commit history gracefully', () => {
+      const streamId = tracker.createStream({
+        name: 'test-stream',
+        agentId: 'agent-1',
+      });
+
+      // Manually insert a change with empty history (edge case)
+      const t = {
+        changes: 'changes',
+      };
+      tracker.db.prepare(`
+        INSERT INTO ${t.changes} (id, stream_id, description, commit_history, current_commit, status)
+        VALUES (?, ?, ?, ?, ?, 'active')
+      `).run('c-edgecase', streamId, 'edge case', '', 'somehash');
+
+      const change = tracker.getChange('c-edgecase');
+      expect(change).not.toBeNull();
+      expect(change!.commitHistory).toEqual([]); // Empty array
+    });
+
+    it('should create change with custom Change-Id', () => {
+      const streamId = tracker.createStream({
+        name: 'test-stream',
+        agentId: 'agent-1',
+      });
+
+      git.checkout(`stream/${streamId}`, { cwd: testRepo.path });
+      fs.writeFileSync(path.join(testRepo.path, 'test.txt'), 'content');
+      git.stageAll({ cwd: testRepo.path });
+      const commit = git.commit('test commit', { cwd: testRepo.path });
+
+      const customId = 'c-custom99';
+      const changeId = changes.createChange(tracker.db, {
+        streamId,
+        commit,
+        description: 'test commit',
+        changeId: customId,
+      });
+
+      expect(changeId).toBe(customId);
+      const change = tracker.getChange(customId);
+      expect(change).not.toBeNull();
+    });
+  });
 });
