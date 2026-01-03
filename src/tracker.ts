@@ -15,6 +15,8 @@ import * as stacks from './stacks.js';
 import * as deps from './dependencies.js';
 import * as changes from './changes.js';
 import * as git from './git/index.js';
+import * as recovery from './recovery.js';
+import * as gc from './gc.js';
 import type {
   Stream,
   StreamStatus,
@@ -56,6 +58,8 @@ export interface TrackerOptions {
   tablePrefix?: string;
   /** Enable verbose logging */
   verbose?: boolean;
+  /** Skip startup recovery (default: false, respects runRecoveryOnStartup config) */
+  skipRecovery?: boolean;
 }
 
 /**
@@ -88,9 +92,14 @@ export class MultiAgentRepoTracker {
     // Register table names for this database instance
     registerTables(this.db, this.tables);
 
-    // Recover orphaned conflicts from any previous crash
-    // This cleans up stale 'in_progress' conflicts older than 1 hour
-    streams.recoverOrphanedConflicts(this.db);
+    // Run startup recovery if configured and not skipped
+    // This cleans up incomplete operations, stale locks, and orphaned conflicts
+    if (!options.skipRecovery) {
+      const gcConfig = gc.getGCConfig(this.db);
+      if (gcConfig.runRecoveryOnStartup) {
+        recovery.startupRecovery(this.db, this.repoPath);
+      }
+    }
   }
 
   /**
@@ -450,5 +459,26 @@ export class MultiAgentRepoTracker {
     });
 
     return result;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Health Check
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Check system health.
+   *
+   * Performs a comprehensive check of the system state including:
+   * - Stream counts (active and archived)
+   * - Active agents
+   * - Stale locks
+   * - Incomplete operations
+   * - Orphaned conflicts
+   * - Pending snapshots
+   *
+   * @returns Health check result
+   */
+  healthCheck(): recovery.HealthCheckResult {
+    return recovery.healthCheck(this.db, this.repoPath);
   }
 }

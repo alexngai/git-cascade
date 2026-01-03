@@ -1,13 +1,20 @@
 /**
- * Operation checkpoint management for crash recovery.
+ * Operation checkpoint management and recovery.
  *
- * Tracks multi-step operations (like cascade rebase) so they can be
- * recovered if a crash occurs mid-operation.
+ * Provides:
+ * - Checkpoint tracking for multi-step operations (crash recovery)
+ * - Health check to assess system state
+ * - Startup recovery to clean up after crashes
  */
 
 import type Database from 'better-sqlite3';
 import { getTables } from './db/tables.js';
 import { resetHard } from './git/commands.js';
+import * as guards from './guards.js';
+import * as snapshots from './snapshots.js';
+import * as conflicts from './conflicts.js';
+import * as gc from './gc.js';
+import * as streams from './streams.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -208,4 +215,215 @@ export function deleteCheckpointsForStream(
 ): void {
   const t = getTables(db);
   db.prepare(`DELETE FROM ${t.operation_checkpoints} WHERE stream_id = ?`).run(streamId);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Health Check
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Result of a health check on the system.
+ */
+export interface HealthCheckResult {
+  /** Whether the system is healthy (no issues found) */
+  healthy: boolean;
+  /** List of issues found during health check */
+  issues: string[];
+  /** Number of active streams */
+  streamCount: number;
+  /** Number of archived streams */
+  archivedCount: number;
+  /** Number of active agents (guards touched within last 60 seconds) */
+  activeAgents: number;
+  /** Number of stale locks (older than 5 minutes) */
+  staleLocks: number;
+  /** Number of incomplete operations (checkpoints) */
+  incompleteOps: number;
+  /** Number of orphaned conflicts (in_progress without active rebase) */
+  orphanedConflicts: number;
+  /** Number of pending snapshots */
+  pendingSnapshots: number;
+}
+
+/** Stale lock threshold: 5 minutes */
+const STALE_LOCK_THRESHOLD_MS = 5 * 60 * 1000;
+
+/** Active agent threshold: 60 seconds */
+const ACTIVE_AGENT_THRESHOLD_S = 60;
+
+/**
+ * Check system health.
+ *
+ * Performs a comprehensive check of the system state including:
+ * - Stream counts (active and archived)
+ * - Active agents (guards within last 60s)
+ * - Stale locks (older than 5 minutes)
+ * - Incomplete operations (checkpoints)
+ * - Orphaned conflicts (in_progress status without active resolution)
+ * - Pending snapshots
+ *
+ * @param db - Database connection
+ * @param _repoPath - Repository path (reserved for future use)
+ * @returns Health check result with counts and issues
+ */
+export function healthCheck(
+  db: Database.Database,
+  _repoPath: string
+): HealthCheckResult {
+  const t = getTables(db);
+  const issues: string[] = [];
+
+  // Count streams
+  const streamCount = (
+    db.prepare(`SELECT COUNT(*) as count FROM ${t.streams}`).get() as { count: number }
+  ).count;
+
+  // Count archived streams
+  const archivedCount = gc.listArchivedStreams(db).length;
+
+  // Count active agents (guards within last 60 seconds)
+  const activeGuards = guards.listActiveGuards(db, ACTIVE_AGENT_THRESHOLD_S);
+  const activeAgents = activeGuards.length;
+
+  // Find stale locks (older than 5 minutes)
+  const staleLockThreshold = Date.now() - STALE_LOCK_THRESHOLD_MS;
+  const staleLocks = (
+    db.prepare(`SELECT COUNT(*) as count FROM ${t.stream_locks} WHERE acquired_at < ?`)
+      .get(staleLockThreshold) as { count: number }
+  ).count;
+
+  if (staleLocks > 0) {
+    issues.push(`${staleLocks} stale lock(s) found (older than 5 minutes)`);
+  }
+
+  // Find incomplete operations
+  const incompleteCheckpoints = getIncompleteCheckpoints(db);
+  const incompleteOps = incompleteCheckpoints.length;
+
+  if (incompleteOps > 0) {
+    issues.push(`${incompleteOps} incomplete operation(s) found`);
+  }
+
+  // Find orphaned conflicts (in_progress status)
+  // These are conflicts that were being resolved but the process crashed
+  const staleConflicts = conflicts.getStaleConflicts(db, 0);
+  const orphanedConflicts = staleConflicts.length;
+
+  if (orphanedConflicts > 0) {
+    issues.push(`${orphanedConflicts} orphaned conflict(s) found (in_progress status)`);
+  }
+
+  // Count pending snapshots
+  const pendingSnapshots = snapshots.listSnapshots(db).length;
+
+  return {
+    healthy: issues.length === 0,
+    issues,
+    streamCount,
+    archivedCount,
+    activeAgents,
+    staleLocks,
+    incompleteOps,
+    orphanedConflicts,
+    pendingSnapshots,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Startup Recovery
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Result of startup recovery operations.
+ */
+export interface StartupRecoveryResult {
+  /** Number of incomplete operations recovered */
+  recoveredOperations: number;
+  /** Number of stale locks released */
+  releasedLocks: number;
+  /** Number of orphaned conflicts recovered */
+  recoveredConflicts: number;
+  /** Number of streams cleaned from conflicted status */
+  cleanedStreams: number;
+  /** Log of actions taken */
+  log: string[];
+}
+
+/**
+ * Run startup recovery to clean up after crashes.
+ *
+ * Performs the following recovery actions:
+ * 1. Recover incomplete operations (clear checkpoints without git reset since we don't have worktree info)
+ * 2. Release stale locks (older than 5 minutes)
+ * 3. Recover orphaned conflicts (in_progress without active rebase)
+ *
+ * Each action is logged for transparency.
+ *
+ * @param db - Database connection
+ * @param _repoPath - Repository path (reserved for future use)
+ * @returns Recovery result with counts and log
+ */
+export function startupRecovery(
+  db: Database.Database,
+  _repoPath: string
+): StartupRecoveryResult {
+  const t = getTables(db);
+  const log: string[] = [];
+  let recoveredOperations = 0;
+  let releasedLocks = 0;
+  let recoveredConflicts = 0;
+  let cleanedStreams = 0;
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Step 1: Recover incomplete operations
+  // ─────────────────────────────────────────────────────────────────────────
+  const incompleteCheckpoints = getIncompleteCheckpoints(db);
+  for (const checkpoint of incompleteCheckpoints) {
+    // We can't do git reset without worktree info, so just clear the checkpoint
+    // The git state may be inconsistent, but at least we won't block future operations
+    completeCheckpoint(db, checkpoint.operationId);
+    log.push(
+      `Cleared incomplete checkpoint: ${checkpoint.operationId} ` +
+      `(stream: ${checkpoint.streamId}, op: ${checkpoint.opType}, step: ${checkpoint.step}/${checkpoint.totalSteps})`
+    );
+    recoveredOperations++;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Step 2: Release stale locks
+  // ─────────────────────────────────────────────────────────────────────────
+  const staleLockThreshold = Date.now() - STALE_LOCK_THRESHOLD_MS;
+  const staleLocksResult = db
+    .prepare(`DELETE FROM ${t.stream_locks} WHERE acquired_at < ?`)
+    .run(staleLockThreshold);
+
+  releasedLocks = staleLocksResult.changes;
+  if (releasedLocks > 0) {
+    log.push(`Released ${releasedLocks} stale lock(s) (older than 5 minutes)`);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Step 3: Recover orphaned conflicts
+  // ─────────────────────────────────────────────────────────────────────────
+  // Use 1 hour threshold as per the existing recoverOrphanedConflicts implementation
+  const orphanedResult = streams.recoverOrphanedConflicts(db, 60 * 60 * 1000);
+
+  recoveredConflicts = orphanedResult.recovered.length;
+  cleanedStreams = orphanedResult.streamsCleaned.length;
+
+  for (const conflictId of orphanedResult.recovered) {
+    log.push(`Recovered orphaned conflict: ${conflictId}`);
+  }
+
+  for (const streamId of orphanedResult.streamsCleaned) {
+    log.push(`Cleaned conflicted status from stream: ${streamId}`);
+  }
+
+  return {
+    recoveredOperations,
+    releasedLocks,
+    recoveredConflicts,
+    cleanedStreams,
+    log,
+  };
 }
