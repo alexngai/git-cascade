@@ -266,3 +266,142 @@ export function pruneSnapshots(
 
   return result.changes;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Safe Operation Wrappers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Result of a safe operation wrapper.
+ */
+export interface SafeOperationResult<T> {
+  /** Whether the operation completed successfully */
+  success: boolean;
+  /** The result of the operation (only present if success is true) */
+  result?: T;
+  /** The error that occurred (only present if success is false) */
+  error?: Error;
+  /** Snapshot ID for recovery if the operation failed (only present if uncommitted changes existed) */
+  snapshotId?: string;
+}
+
+/**
+ * Execute an operation with automatic snapshot protection.
+ *
+ * Creates a snapshot of uncommitted work before executing a risky operation.
+ * If the operation fails, the snapshot ID is returned for recovery.
+ *
+ * @example
+ * ```typescript
+ * // Protect a rebase operation
+ * const result = safeOperation(
+ *   db,
+ *   '/path/to/worktree',
+ *   'agent-1',
+ *   'rebase',
+ *   () => git.rebase('main', { cwd: '/path/to/worktree' })
+ * );
+ *
+ * if (!result.success) {
+ *   console.error('Rebase failed:', result.error?.message);
+ *   if (result.snapshotId) {
+ *     // Restore uncommitted changes
+ *     restore(db, result.snapshotId, '/path/to/worktree');
+ *   }
+ * }
+ * ```
+ *
+ * @param db - Database connection
+ * @param worktree - Path to the worktree to protect
+ * @param agentId - ID of the agent performing the operation
+ * @param operation - Description of the operation (used as snapshot reason)
+ * @param func - The function to execute
+ * @returns Result containing success status, result/error, and snapshot ID
+ */
+export function safeOperation<T>(
+  db: Database.Database,
+  worktree: string,
+  agentId: string,
+  operation: string,
+  func: () => T
+): SafeOperationResult<T> {
+  // Create snapshot before operation (if uncommitted changes exist)
+  const snapshotId = snapshot(db, worktree, agentId, `pre-${operation}`) ?? undefined;
+
+  try {
+    const result = func();
+    return {
+      success: true,
+      result,
+      snapshotId,
+    };
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err : new Error(String(err)),
+      snapshotId,
+    };
+  }
+}
+
+/**
+ * Execute an async operation with automatic snapshot protection.
+ *
+ * Creates a snapshot of uncommitted work before executing a risky async operation.
+ * If the operation fails, the snapshot ID is returned for recovery.
+ *
+ * @example
+ * ```typescript
+ * // Protect an async merge operation
+ * const result = await safeOperationAsync(
+ *   db,
+ *   '/path/to/worktree',
+ *   'agent-1',
+ *   'merge',
+ *   async () => {
+ *     await git.fetchAsync({ cwd: '/path/to/worktree' });
+ *     return git.merge('origin/main', { cwd: '/path/to/worktree' });
+ *   }
+ * );
+ *
+ * if (!result.success) {
+ *   console.error('Merge failed:', result.error?.message);
+ *   if (result.snapshotId) {
+ *     // Restore uncommitted changes
+ *     restore(db, result.snapshotId, '/path/to/worktree');
+ *   }
+ * }
+ * ```
+ *
+ * @param db - Database connection
+ * @param worktree - Path to the worktree to protect
+ * @param agentId - ID of the agent performing the operation
+ * @param operation - Description of the operation (used as snapshot reason)
+ * @param func - The async function to execute
+ * @returns Promise resolving to result containing success status, result/error, and snapshot ID
+ */
+export async function safeOperationAsync<T>(
+  db: Database.Database,
+  worktree: string,
+  agentId: string,
+  operation: string,
+  func: () => Promise<T>
+): Promise<SafeOperationResult<T>> {
+  // Create snapshot before operation (if uncommitted changes exist)
+  const snapshotId = snapshot(db, worktree, agentId, `pre-${operation}`) ?? undefined;
+
+  try {
+    const result = await func();
+    return {
+      success: true,
+      result,
+      snapshotId,
+    };
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err : new Error(String(err)),
+      snapshotId,
+    };
+  }
+}

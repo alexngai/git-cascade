@@ -443,4 +443,333 @@ describe('Working Copy Snapshots', () => {
       }
     });
   });
+
+  describe('safeOperation()', () => {
+    it('should return success with result when operation succeeds', () => {
+      const result = snapshots.safeOperation(
+        tracker.db,
+        repoPath,
+        'agent-1',
+        'test-op',
+        () => 42
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.result).toBe(42);
+      expect(result.error).toBeUndefined();
+    });
+
+    it('should return success with snapshotId when uncommitted changes exist', () => {
+      createUncommittedChanges('test.txt', 'content');
+
+      const result = snapshots.safeOperation(
+        tracker.db,
+        repoPath,
+        'agent-1',
+        'test-op',
+        () => 'done'
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.result).toBe('done');
+      expect(result.snapshotId).toMatch(/^snap-[a-f0-9]{8}$/);
+
+      // Verify snapshot was created with pre- prefix
+      const snap = snapshots.getSnapshot(tracker.db, result.snapshotId!);
+      expect(snap!.reason).toBe('pre-test-op');
+    });
+
+    it('should not create snapshot when working directory is clean', () => {
+      const result = snapshots.safeOperation(
+        tracker.db,
+        repoPath,
+        'agent-1',
+        'test-op',
+        () => 'success'
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.snapshotId).toBeUndefined();
+    });
+
+    it('should return error when operation throws', () => {
+      const result = snapshots.safeOperation(
+        tracker.db,
+        repoPath,
+        'agent-1',
+        'test-op',
+        () => {
+          throw new Error('Operation failed');
+        }
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.result).toBeUndefined();
+      expect(result.error).toBeInstanceOf(Error);
+      expect(result.error!.message).toBe('Operation failed');
+    });
+
+    it('should return snapshotId when operation fails with uncommitted changes', () => {
+      createUncommittedChanges('test.txt', 'content');
+
+      const result = snapshots.safeOperation(
+        tracker.db,
+        repoPath,
+        'agent-1',
+        'rebase',
+        () => {
+          throw new Error('Rebase conflict');
+        }
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.snapshotId).toMatch(/^snap-[a-f0-9]{8}$/);
+      expect(result.error!.message).toBe('Rebase conflict');
+
+      // Working directory should be clean (snapshot captured the changes)
+      expect(git.isClean({ cwd: repoPath })).toBe(true);
+
+      // Should be able to restore using the snapshot ID
+      const restored = snapshots.restore(tracker.db, result.snapshotId!, repoPath);
+      expect(restored).toBe(true);
+
+      // File should be restored
+      const filePath = path.join(repoPath, 'test.txt');
+      expect(fs.existsSync(filePath)).toBe(true);
+      expect(fs.readFileSync(filePath, 'utf-8')).toBe('content');
+    });
+
+    it('should convert non-Error throws to Error objects', () => {
+      const result = snapshots.safeOperation(
+        tracker.db,
+        repoPath,
+        'agent-1',
+        'test-op',
+        () => {
+          throw 'string error';
+        }
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBeInstanceOf(Error);
+      expect(result.error!.message).toBe('string error');
+    });
+
+    it('should work with generic return types', () => {
+      interface MyResult {
+        value: number;
+        name: string;
+      }
+
+      const result = snapshots.safeOperation<MyResult>(
+        tracker.db,
+        repoPath,
+        'agent-1',
+        'test-op',
+        () => ({ value: 123, name: 'test' })
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.result).toEqual({ value: 123, name: 'test' });
+    });
+  });
+
+  describe('safeOperationAsync()', () => {
+    it('should return success with result when async operation succeeds', async () => {
+      const result = await snapshots.safeOperationAsync(
+        tracker.db,
+        repoPath,
+        'agent-1',
+        'async-op',
+        async () => {
+          return Promise.resolve(42);
+        }
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.result).toBe(42);
+      expect(result.error).toBeUndefined();
+    });
+
+    it('should return success with snapshotId when uncommitted changes exist', async () => {
+      createUncommittedChanges('test.txt', 'async content');
+
+      const result = await snapshots.safeOperationAsync(
+        tracker.db,
+        repoPath,
+        'agent-1',
+        'async-op',
+        async () => 'async done'
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.result).toBe('async done');
+      expect(result.snapshotId).toMatch(/^snap-[a-f0-9]{8}$/);
+
+      // Verify snapshot was created with pre- prefix
+      const snap = snapshots.getSnapshot(tracker.db, result.snapshotId!);
+      expect(snap!.reason).toBe('pre-async-op');
+    });
+
+    it('should not create snapshot when working directory is clean', async () => {
+      const result = await snapshots.safeOperationAsync(
+        tracker.db,
+        repoPath,
+        'agent-1',
+        'async-op',
+        async () => 'success'
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.snapshotId).toBeUndefined();
+    });
+
+    it('should return error when async operation rejects', async () => {
+      const result = await snapshots.safeOperationAsync(
+        tracker.db,
+        repoPath,
+        'agent-1',
+        'async-op',
+        async () => {
+          throw new Error('Async operation failed');
+        }
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.result).toBeUndefined();
+      expect(result.error).toBeInstanceOf(Error);
+      expect(result.error!.message).toBe('Async operation failed');
+    });
+
+    it('should return snapshotId when async operation fails with uncommitted changes', async () => {
+      createUncommittedChanges('test.txt', 'content');
+
+      const result = await snapshots.safeOperationAsync(
+        tracker.db,
+        repoPath,
+        'agent-1',
+        'merge',
+        async () => {
+          throw new Error('Merge conflict');
+        }
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.snapshotId).toMatch(/^snap-[a-f0-9]{8}$/);
+      expect(result.error!.message).toBe('Merge conflict');
+
+      // Working directory should be clean (snapshot captured the changes)
+      expect(git.isClean({ cwd: repoPath })).toBe(true);
+
+      // Should be able to restore using the snapshot ID
+      const restored = snapshots.restore(tracker.db, result.snapshotId!, repoPath);
+      expect(restored).toBe(true);
+    });
+
+    it('should convert non-Error rejects to Error objects', async () => {
+      const result = await snapshots.safeOperationAsync(
+        tracker.db,
+        repoPath,
+        'agent-1',
+        'async-op',
+        async () => {
+          throw 'string error';
+        }
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBeInstanceOf(Error);
+      expect(result.error!.message).toBe('string error');
+    });
+
+    it('should work with generic return types', async () => {
+      interface AsyncResult {
+        items: string[];
+        count: number;
+      }
+
+      const result = await snapshots.safeOperationAsync<AsyncResult>(
+        tracker.db,
+        repoPath,
+        'agent-1',
+        'async-op',
+        async () => ({ items: ['a', 'b'], count: 2 })
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.result).toEqual({ items: ['a', 'b'], count: 2 });
+    });
+
+    it('should handle rejected promises correctly', async () => {
+      const result = await snapshots.safeOperationAsync(
+        tracker.db,
+        repoPath,
+        'agent-1',
+        'async-op',
+        () => Promise.reject(new Error('Rejected promise'))
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error!.message).toBe('Rejected promise');
+    });
+  });
+
+  describe('safe operation recovery workflow', () => {
+    it('should enable recovery after failed operation', () => {
+      // Create some uncommitted work
+      createUncommittedChanges('important-work.txt', 'valuable changes');
+
+      // Simulate a risky operation that fails
+      const result = snapshots.safeOperation(
+        tracker.db,
+        repoPath,
+        'agent-1',
+        'rebase',
+        () => {
+          // In a real scenario, this might be git.rebase() that fails
+          throw new Error('Rebase failed due to conflicts');
+        }
+      );
+
+      // Verify the operation failed but we have a recovery path
+      expect(result.success).toBe(false);
+      expect(result.snapshotId).toBeDefined();
+
+      // Working directory is clean (changes were stashed)
+      expect(git.isClean({ cwd: repoPath })).toBe(true);
+
+      // Perform recovery
+      const recovered = snapshots.restore(tracker.db, result.snapshotId!, repoPath);
+      expect(recovered).toBe(true);
+
+      // Verify our important work is back
+      const filePath = path.join(repoPath, 'important-work.txt');
+      expect(fs.existsSync(filePath)).toBe(true);
+      expect(fs.readFileSync(filePath, 'utf-8')).toBe('valuable changes');
+    });
+
+    it('should allow cleanup after successful operation', () => {
+      createUncommittedChanges('work.txt', 'in-progress');
+
+      const result = snapshots.safeOperation(
+        tracker.db,
+        repoPath,
+        'agent-1',
+        'successful-op',
+        () => {
+          // Operation succeeds
+          return 'completed';
+        }
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.snapshotId).toBeDefined();
+
+      // Can optionally clean up the snapshot after successful operation
+      snapshots.deleteSnapshot(tracker.db, result.snapshotId!);
+
+      // Verify snapshot is gone
+      expect(snapshots.getSnapshot(tracker.db, result.snapshotId!)).toBeNull();
+    });
+  });
 });
