@@ -35,5 +35,8 @@ export * as conflicts from './conflicts.js';
 // GC configuration (low-level API)
 export * as gc from './gc.js';
 
+// Recovery (low-level API)
+export * as recovery from './recovery.js';
+
 // Errors
 export * from './errors.js';

@@ -219,6 +219,19 @@ function initializeSchema(db: Database.Database, prefix: string): void {
       value TEXT NOT NULL
     );
 
+    -- Operation checkpoints table (crash recovery)
+    CREATE TABLE IF NOT EXISTS ${prefix}operation_checkpoints (
+      operation_id TEXT PRIMARY KEY,
+      stream_id TEXT NOT NULL,
+      op_type TEXT NOT NULL,
+      step INTEGER NOT NULL,
+      total_steps INTEGER NOT NULL,
+      before_state TEXT NOT NULL,
+      current_state TEXT NOT NULL,
+      started_at INTEGER NOT NULL,
+      FOREIGN KEY (stream_id) REFERENCES ${prefix}streams(id)
+    );
+
     -- Indexes
     CREATE INDEX IF NOT EXISTS ${prefix}idx_streams_agent ON ${prefix}streams(agent_id);
     CREATE INDEX IF NOT EXISTS ${prefix}idx_streams_status ON ${prefix}streams(status);

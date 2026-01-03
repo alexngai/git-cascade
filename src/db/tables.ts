@@ -19,6 +19,7 @@ export interface TableNames {
   wc_snapshots: string;
   archived_streams: string;
   gc_config: string;
+  operation_checkpoints: string;
 }
 
 /**
@@ -45,6 +46,7 @@ export function getTableNames(prefix: string = ''): TableNames {
     wc_snapshots: `${prefix}wc_snapshots`,
     archived_streams: `${prefix}archived_streams`,
     gc_config: `${prefix}gc_config`,
+    operation_checkpoints: `${prefix}operation_checkpoints`,
   };
 }
 
