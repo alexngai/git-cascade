@@ -213,6 +213,12 @@ function initializeSchema(db: Database.Database, prefix: string): void {
       metadata TEXT NOT NULL DEFAULT '{}'
     );
 
+    -- GC configuration table
+    CREATE TABLE IF NOT EXISTS ${prefix}gc_config (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+
     -- Indexes
     CREATE INDEX IF NOT EXISTS ${prefix}idx_streams_agent ON ${prefix}streams(agent_id);
     CREATE INDEX IF NOT EXISTS ${prefix}idx_streams_status ON ${prefix}streams(status);

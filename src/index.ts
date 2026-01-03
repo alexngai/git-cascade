@@ -32,5 +32,8 @@ export * as changes from './changes.js';
 // Conflict tracking (low-level API)
 export * as conflicts from './conflicts.js';
 
+// GC configuration (low-level API)
+export * as gc from './gc.js';
+
 // Errors
 export * from './errors.js';

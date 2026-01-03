@@ -18,6 +18,7 @@ export interface TableNames {
   conflicts: string;
   wc_snapshots: string;
   archived_streams: string;
+  gc_config: string;
 }
 
 /**
@@ -43,6 +44,7 @@ export function getTableNames(prefix: string = ''): TableNames {
     conflicts: `${prefix}conflicts`,
     wc_snapshots: `${prefix}wc_snapshots`,
     archived_streams: `${prefix}archived_streams`,
+    gc_config: `${prefix}gc_config`,
   };
 }
 
