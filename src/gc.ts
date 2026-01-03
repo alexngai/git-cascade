@@ -245,32 +245,35 @@ export function archiveStream(
     throw new Error(`Stream not found: ${streamId}`);
   }
 
-  // Clear the stream guard first (before deleting from streams due to FK constraint)
-  clearGuard(db, streamId);
+  // Wrap all archive operations in a transaction to ensure atomicity
+  db.transaction(() => {
+    // Clear the stream guard first (before deleting from streams due to FK constraint)
+    clearGuard(db, streamId);
 
-  // Insert into archived_streams
-  db.prepare(`
-    INSERT INTO ${t.archived_streams} (
-      id, name, agent_id, base_commit, parent_stream, status,
-      created_at, updated_at, archived_at, merged_into, enable_stacked_review, metadata
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    row.id,
-    row.name,
-    row.agent_id,
-    row.base_commit,
-    row.parent_stream,
-    row.status,
-    row.created_at,
-    row.updated_at,
-    now,
-    row.merged_into,
-    row.enable_stacked_review,
-    row.metadata
-  );
+    // Insert into archived_streams
+    db.prepare(`
+      INSERT INTO ${t.archived_streams} (
+        id, name, agent_id, base_commit, parent_stream, status,
+        created_at, updated_at, archived_at, merged_into, enable_stacked_review, metadata
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      row.id,
+      row.name,
+      row.agent_id,
+      row.base_commit,
+      row.parent_stream,
+      row.status,
+      row.created_at,
+      row.updated_at,
+      now,
+      row.merged_into,
+      row.enable_stacked_review,
+      row.metadata
+    );
 
-  // Delete from streams table
-  db.prepare(`DELETE FROM ${t.streams} WHERE id = ?`).run(streamId);
+    // Delete from streams table
+    db.prepare(`DELETE FROM ${t.streams} WHERE id = ?`).run(streamId);
+  })();
 
   return {
     streamId,
