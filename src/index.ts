@@ -38,5 +38,8 @@ export * as gc from './gc.js';
 // Recovery (low-level API)
 export * as recovery from './recovery.js';
 
+// Guards (low-level API)
+export * as guards from './guards.js';
+
 // Errors
 export * from './errors.js';

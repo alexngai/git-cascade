@@ -192,3 +192,24 @@ export class ConflictResolutionError extends Error {
     this.reason = reason;
   }
 }
+
+/**
+ * Concurrent modification detected via stream guard.
+ * Thrown when another agent has written to a stream since the current agent
+ * last read from it (optimistic concurrency violation).
+ */
+export class ConcurrentModificationError extends Error {
+  streamId: string;
+  lastWriter: string;
+  lastWriteTime: number;
+
+  constructor(streamId: string, lastWriter: string, lastWriteTime: number) {
+    super(
+      `Concurrent modification on stream ${streamId}: last written by ${lastWriter} at ${lastWriteTime}`
+    );
+    this.name = 'ConcurrentModificationError';
+    this.streamId = streamId;
+    this.lastWriter = lastWriter;
+    this.lastWriteTime = lastWriteTime;
+  }
+}
