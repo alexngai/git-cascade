@@ -24,6 +24,7 @@ import * as changes from './changes.js';
 import * as cascade from './cascade.js';
 import { StreamNotFoundError, BranchNotFoundError, StreamConflictedError, ConflictResolutionError } from './errors.js';
 import * as conflicts from './conflicts.js';
+import * as gc from './gc.js';
 
 /** Default timeout for conflict handler (5 minutes) */
 const DEFAULT_CONFLICT_TIMEOUT = 300000;
@@ -207,6 +208,60 @@ export function updateStream(
   db.prepare(`UPDATE ${t.streams} SET ${setClauses.join(', ')} WHERE id = ?`).run(
     ...params
   );
+}
+
+/**
+ * Result of updating a stream's status.
+ */
+export interface UpdateStreamStatusResult {
+  /** The new status */
+  status: StreamStatus;
+  /** If the stream was archived, contains the archive result */
+  archived?: gc.ArchiveResult;
+}
+
+/**
+ * Update a stream's status with optional auto-archive behavior.
+ *
+ * When status changes to 'merged' or 'abandoned', checks GCConfig to
+ * determine if auto-archiving should occur.
+ *
+ * @param db - Database connection
+ * @param repoPath - Repository path
+ * @param streamId - ID of the stream to update
+ * @param status - New status to set
+ * @returns Result including new status and optional archive info
+ */
+export function updateStreamStatus(
+  db: Database.Database,
+  repoPath: string,
+  streamId: string,
+  status: StreamStatus
+): UpdateStreamStatusResult {
+  // Verify stream exists (throws if not found)
+  getStreamOrThrow(db, streamId);
+
+  const now = Date.now();
+  const t = getTables(db);
+
+  // Update the status
+  db.prepare(`
+    UPDATE ${t.streams} SET status = ?, updated_at = ?
+    WHERE id = ?
+  `).run(status, now, streamId);
+
+  const result: UpdateStreamStatusResult = { status };
+
+  // Check for auto-archive conditions
+  const config = gc.getGCConfig(db);
+
+  if (status === 'merged' && config.autoArchiveOnMerge) {
+    result.archived = gc.archiveStream(db, repoPath, streamId);
+  } else if (status === 'abandoned' && config.autoArchiveOnAbandon) {
+    result.archived = gc.archiveStream(db, repoPath, streamId);
+  }
+
+  return result;
 }
 
 /**

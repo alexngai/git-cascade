@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { MultiAgentRepoTracker } from '../src/tracker.js';
 import { createTestRepo } from './setup.js';
 import * as gc from '../src/gc.js';
+import * as streams from '../src/streams.js';
+import * as guards from '../src/guards.js';
 
 describe('GC Configuration', () => {
   let tracker: MultiAgentRepoTracker;
@@ -189,6 +191,361 @@ describe('GC Configuration', () => {
       // Set back to true
       gc.setGCConfig(tracker.db, { deleteGitBranches: true });
       expect(gc.getGCConfig(tracker.db).deleteGitBranches).toBe(true);
+    });
+  });
+});
+
+describe('Stream Archiving', () => {
+  let tracker: MultiAgentRepoTracker;
+  let testRepo: ReturnType<typeof createTestRepo>;
+
+  beforeEach(() => {
+    testRepo = createTestRepo();
+    tracker = new MultiAgentRepoTracker({ repoPath: testRepo.path });
+  });
+
+  afterEach(() => {
+    tracker.close();
+    testRepo.cleanup();
+  });
+
+  describe('archiveStream', () => {
+    it('should move stream from streams to archived_streams', () => {
+      const streamId = tracker.createStream({
+        name: 'test-stream',
+        agentId: 'agent-1',
+      });
+
+      // Verify stream exists in streams table
+      const stream = tracker.getStream(streamId);
+      expect(stream).not.toBeNull();
+
+      // Archive the stream
+      const result = gc.archiveStream(tracker.db, testRepo.path, streamId);
+
+      expect(result.streamId).toBe(streamId);
+      expect(result.archivedAt).toBeGreaterThan(0);
+
+      // Stream should no longer be in streams table
+      const afterArchive = tracker.getStream(streamId);
+      expect(afterArchive).toBeNull();
+
+      // Stream should be in archived_streams
+      const archived = gc.getArchivedStream(tracker.db, streamId);
+      expect(archived).not.toBeNull();
+      expect(archived!.id).toBe(streamId);
+      expect(archived!.name).toBe('test-stream');
+      expect(archived!.agentId).toBe('agent-1');
+      expect(archived!.archivedAt).toBe(result.archivedAt);
+    });
+
+    it('should preserve all stream properties when archiving', () => {
+      const streamId = tracker.createStream({
+        name: 'feature-stream',
+        agentId: 'agent-1',
+        metadata: { priority: 'high', tags: ['test'] },
+        enableStackedReview: true,
+      });
+
+      const originalStream = tracker.getStream(streamId)!;
+
+      gc.archiveStream(tracker.db, testRepo.path, streamId);
+
+      const archived = gc.getArchivedStream(tracker.db, streamId)!;
+
+      expect(archived.name).toBe(originalStream.name);
+      expect(archived.agentId).toBe(originalStream.agentId);
+      expect(archived.baseCommit).toBe(originalStream.baseCommit);
+      expect(archived.status).toBe(originalStream.status);
+      expect(archived.createdAt).toBe(originalStream.createdAt);
+      expect(archived.updatedAt).toBe(originalStream.updatedAt);
+      expect(archived.enableStackedReview).toBe(originalStream.enableStackedReview);
+      expect(archived.metadata).toEqual(originalStream.metadata);
+    });
+
+    it('should clear stream guard on archive', () => {
+      const streamId = tracker.createStream({
+        name: 'guarded-stream',
+        agentId: 'agent-1',
+      });
+
+      // Touch the guard
+      guards.touchGuard(tracker.db, streamId, 'agent-1');
+
+      // Verify guard exists
+      const guardBefore = guards.getGuard(tracker.db, streamId);
+      expect(guardBefore).not.toBeNull();
+
+      // Archive the stream
+      gc.archiveStream(tracker.db, testRepo.path, streamId);
+
+      // Guard should be cleared
+      const guardAfter = guards.getGuard(tracker.db, streamId);
+      expect(guardAfter).toBeNull();
+    });
+
+    it('should throw error for non-existent stream', () => {
+      expect(() => {
+        gc.archiveStream(tracker.db, testRepo.path, 'non-existent');
+      }).toThrow('Stream not found: non-existent');
+    });
+  });
+
+  describe('isArchived', () => {
+    it('should return false for non-archived stream', () => {
+      const streamId = tracker.createStream({
+        name: 'active-stream',
+        agentId: 'agent-1',
+      });
+
+      expect(gc.isArchived(tracker.db, streamId)).toBe(false);
+    });
+
+    it('should return true for archived stream', () => {
+      const streamId = tracker.createStream({
+        name: 'to-archive',
+        agentId: 'agent-1',
+      });
+
+      gc.archiveStream(tracker.db, testRepo.path, streamId);
+
+      expect(gc.isArchived(tracker.db, streamId)).toBe(true);
+    });
+
+    it('should return false for non-existent stream', () => {
+      expect(gc.isArchived(tracker.db, 'non-existent')).toBe(false);
+    });
+  });
+
+  describe('getArchivedStream', () => {
+    it('should return null for non-archived stream', () => {
+      const streamId = tracker.createStream({
+        name: 'active-stream',
+        agentId: 'agent-1',
+      });
+
+      const archived = gc.getArchivedStream(tracker.db, streamId);
+      expect(archived).toBeNull();
+    });
+
+    it('should return archived stream with all properties', () => {
+      const streamId = tracker.createStream({
+        name: 'to-archive',
+        agentId: 'agent-1',
+        metadata: { key: 'value' },
+      });
+
+      gc.archiveStream(tracker.db, testRepo.path, streamId);
+
+      const archived = gc.getArchivedStream(tracker.db, streamId);
+      expect(archived).not.toBeNull();
+      expect(archived!.id).toBe(streamId);
+      expect(archived!.name).toBe('to-archive');
+      expect(archived!.agentId).toBe('agent-1');
+      expect(archived!.metadata).toEqual({ key: 'value' });
+    });
+  });
+
+  describe('listArchivedStreams', () => {
+    it('should return empty array when no archived streams', () => {
+      const archived = gc.listArchivedStreams(tracker.db);
+      expect(archived).toEqual([]);
+    });
+
+    it('should return all archived streams', () => {
+      const id1 = tracker.createStream({ name: 'stream-1', agentId: 'agent-1' });
+      const id2 = tracker.createStream({ name: 'stream-2', agentId: 'agent-1' });
+      tracker.createStream({ name: 'stream-3', agentId: 'agent-1' });
+
+      gc.archiveStream(tracker.db, testRepo.path, id1);
+      gc.archiveStream(tracker.db, testRepo.path, id2);
+
+      const archived = gc.listArchivedStreams(tracker.db);
+      expect(archived).toHaveLength(2);
+      expect(archived.map((s) => s.id)).toContain(id1);
+      expect(archived.map((s) => s.id)).toContain(id2);
+    });
+
+    it('should order by archived_at DESC', () => {
+      const id1 = tracker.createStream({ name: 'stream-1', agentId: 'agent-1' });
+      const id2 = tracker.createStream({ name: 'stream-2', agentId: 'agent-1' });
+
+      gc.archiveStream(tracker.db, testRepo.path, id1);
+      gc.archiveStream(tracker.db, testRepo.path, id2);
+
+      const archived = gc.listArchivedStreams(tracker.db);
+      expect(archived).toHaveLength(2);
+      // Verify ordering is consistent (by archived_at DESC)
+      // Note: timestamps may be equal if both happen in same ms,
+      // so just verify the list contains both and is sorted
+      expect(archived[0].archivedAt).toBeGreaterThanOrEqual(archived[1].archivedAt);
+      expect(archived.map((s) => s.id)).toContain(id1);
+      expect(archived.map((s) => s.id)).toContain(id2);
+    });
+
+    it('should filter by olderThanDays', () => {
+      const id1 = tracker.createStream({ name: 'stream-1', agentId: 'agent-1' });
+      const id2 = tracker.createStream({ name: 'stream-2', agentId: 'agent-1' });
+
+      gc.archiveStream(tracker.db, testRepo.path, id1);
+      gc.archiveStream(tracker.db, testRepo.path, id2);
+
+      // With olderThanDays=1, recently archived streams should NOT be returned
+      // (because they're not older than 1 day)
+      const recentStreams = gc.listArchivedStreams(tracker.db, { olderThanDays: 1 });
+      expect(recentStreams).toHaveLength(0);
+
+      // Without filter, all archived streams should be returned
+      const allStreams = gc.listArchivedStreams(tracker.db);
+      expect(allStreams).toHaveLength(2);
+    });
+  });
+});
+
+describe('Auto-archive Integration', () => {
+  let tracker: MultiAgentRepoTracker;
+  let testRepo: ReturnType<typeof createTestRepo>;
+
+  beforeEach(() => {
+    testRepo = createTestRepo();
+    tracker = new MultiAgentRepoTracker({ repoPath: testRepo.path });
+  });
+
+  afterEach(() => {
+    tracker.close();
+    testRepo.cleanup();
+  });
+
+  describe('updateStreamStatus', () => {
+    it('should auto-archive on merge when autoArchiveOnMerge is true', () => {
+      const streamId = tracker.createStream({
+        name: 'to-merge',
+        agentId: 'agent-1',
+      });
+
+      // Ensure autoArchiveOnMerge is true (default)
+      gc.setGCConfig(tracker.db, { autoArchiveOnMerge: true });
+
+      const result = streams.updateStreamStatus(
+        tracker.db,
+        testRepo.path,
+        streamId,
+        'merged'
+      );
+
+      expect(result.status).toBe('merged');
+      expect(result.archived).toBeDefined();
+      expect(result.archived!.streamId).toBe(streamId);
+
+      // Stream should be archived
+      expect(gc.isArchived(tracker.db, streamId)).toBe(true);
+      expect(tracker.getStream(streamId)).toBeNull();
+    });
+
+    it('should not auto-archive on merge when autoArchiveOnMerge is false', () => {
+      const streamId = tracker.createStream({
+        name: 'to-merge',
+        agentId: 'agent-1',
+      });
+
+      gc.setGCConfig(tracker.db, { autoArchiveOnMerge: false });
+
+      const result = streams.updateStreamStatus(
+        tracker.db,
+        testRepo.path,
+        streamId,
+        'merged'
+      );
+
+      expect(result.status).toBe('merged');
+      expect(result.archived).toBeUndefined();
+
+      // Stream should still exist in streams table
+      expect(gc.isArchived(tracker.db, streamId)).toBe(false);
+      expect(tracker.getStream(streamId)).not.toBeNull();
+    });
+
+    it('should auto-archive on abandon when autoArchiveOnAbandon is true', () => {
+      const streamId = tracker.createStream({
+        name: 'to-abandon',
+        agentId: 'agent-1',
+      });
+
+      gc.setGCConfig(tracker.db, { autoArchiveOnAbandon: true });
+
+      const result = streams.updateStreamStatus(
+        tracker.db,
+        testRepo.path,
+        streamId,
+        'abandoned'
+      );
+
+      expect(result.status).toBe('abandoned');
+      expect(result.archived).toBeDefined();
+      expect(result.archived!.streamId).toBe(streamId);
+
+      // Stream should be archived
+      expect(gc.isArchived(tracker.db, streamId)).toBe(true);
+    });
+
+    it('should not auto-archive on abandon when autoArchiveOnAbandon is false', () => {
+      const streamId = tracker.createStream({
+        name: 'to-abandon',
+        agentId: 'agent-1',
+      });
+
+      gc.setGCConfig(tracker.db, { autoArchiveOnAbandon: false });
+
+      const result = streams.updateStreamStatus(
+        tracker.db,
+        testRepo.path,
+        streamId,
+        'abandoned'
+      );
+
+      expect(result.status).toBe('abandoned');
+      expect(result.archived).toBeUndefined();
+
+      // Stream should still exist in streams table
+      expect(gc.isArchived(tracker.db, streamId)).toBe(false);
+    });
+
+    it('should not auto-archive for other status changes', () => {
+      const streamId = tracker.createStream({
+        name: 'test-stream',
+        agentId: 'agent-1',
+      });
+
+      // Test paused status
+      const pausedResult = streams.updateStreamStatus(
+        tracker.db,
+        testRepo.path,
+        streamId,
+        'paused'
+      );
+      expect(pausedResult.archived).toBeUndefined();
+      expect(gc.isArchived(tracker.db, streamId)).toBe(false);
+
+      // Test active status
+      const activeResult = streams.updateStreamStatus(
+        tracker.db,
+        testRepo.path,
+        streamId,
+        'active'
+      );
+      expect(activeResult.archived).toBeUndefined();
+      expect(gc.isArchived(tracker.db, streamId)).toBe(false);
+    });
+
+    it('should throw error for non-existent stream', () => {
+      expect(() => {
+        streams.updateStreamStatus(
+          tracker.db,
+          testRepo.path,
+          'non-existent',
+          'merged'
+        );
+      }).toThrow();
     });
   });
 });
