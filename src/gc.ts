@@ -9,6 +9,9 @@
 import type Database from 'better-sqlite3';
 import { getTables } from './db/tables.js';
 import { clearGuard } from './guards.js';
+import * as git from './git/index.js';
+import * as snapshots from './snapshots.js';
+import * as recovery from './recovery.js';
 import type { StreamStatus } from './models/index.js';
 
 /**
@@ -350,4 +353,281 @@ export function listArchivedStreams(
 
   const rows = db.prepare(query).all(...params) as Record<string, unknown>[];
   return rows.map(rowToArchivedStream);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Prune and GC Operations
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Result of pruning archived streams.
+ */
+export interface PruneResult {
+  /** Number of streams pruned */
+  prunedStreams: number;
+  /** List of git branches deleted */
+  deletedBranches: string[];
+  /** Any errors encountered during pruning */
+  errors: string[];
+}
+
+/**
+ * Result of a full garbage collection.
+ */
+export interface GCResult {
+  /** Number of streams archived in this run */
+  archivedStreams: number;
+  /** Number of archived streams pruned */
+  prunedStreams: number;
+  /** Number of old snapshots pruned */
+  prunedSnapshots: number;
+  /** Number of orphaned worktrees cleaned */
+  cleanedWorktrees: number;
+  /** Number of incomplete operations recovered */
+  recoveredOperations: number;
+  /** Number of stale locks released */
+  releasedLocks: number;
+  /** Any errors encountered during GC */
+  errors: string[];
+}
+
+/**
+ * Prune archived streams past their retention period.
+ *
+ * Deletes archived streams older than the specified threshold, including:
+ * - The archived_streams record
+ * - Associated git branch (stream/{id}) if deleteGitBranches config is true
+ * - Related operations, dependencies, and conflicts
+ *
+ * @param db - Database connection
+ * @param repoPath - Path to the git repository
+ * @param olderThanDays - Days threshold (defaults to archiveRetentionDays from config)
+ * @returns Prune result with counts and any errors
+ */
+export function prune(
+  db: Database.Database,
+  repoPath: string,
+  olderThanDays?: number
+): PruneResult {
+  const config = getGCConfig(db);
+  const t = getTables(db);
+
+  const threshold = olderThanDays ?? config.archiveRetentionDays;
+  // When threshold is 0, we want to prune all archived streams including those just archived
+  // Add 1ms to include streams archived at the same millisecond
+  const cutoffMs = Date.now() - threshold * 24 * 60 * 60 * 1000 + (threshold === 0 ? 1 : 0);
+
+  const result: PruneResult = {
+    prunedStreams: 0,
+    deletedBranches: [],
+    errors: [],
+  };
+
+  // Get all archived streams older than (or equal to for threshold=0) the threshold
+  const oldStreams = db
+    .prepare(`SELECT id FROM ${t.archived_streams} WHERE archived_at < ?`)
+    .all(cutoffMs) as Array<{ id: string }>;
+
+  for (const { id } of oldStreams) {
+    try {
+      // Delete git branch if configured
+      if (config.deleteGitBranches) {
+        const branchName = `stream/${id}`;
+        try {
+          git.deleteBranch(branchName, true, { cwd: repoPath });
+          result.deletedBranches.push(branchName);
+        } catch (error) {
+          // Branch might not exist (already deleted or never pushed)
+          // Log but continue - this is not a fatal error
+          const errMsg = error instanceof Error ? error.message : String(error);
+          if (!errMsg.includes('not found')) {
+            result.errors.push(`Failed to delete branch ${branchName}: ${errMsg}`);
+          }
+        }
+      }
+
+      // Delete related records in a transaction
+      db.transaction(() => {
+        // Delete operations for this stream (FK constraint - operations reference streams)
+        db.prepare(`DELETE FROM ${t.operations} WHERE stream_id = ?`).run(id);
+
+        // Delete dependencies for this stream
+        db.prepare(`DELETE FROM ${t.dependencies} WHERE stream_id = ?`).run(id);
+
+        // Delete conflicts for this stream
+        db.prepare(`DELETE FROM ${t.conflicts} WHERE stream_id = ?`).run(id);
+
+        // Delete changes for this stream
+        db.prepare(`DELETE FROM ${t.changes} WHERE stream_id = ?`).run(id);
+
+        // Delete operation checkpoints for this stream
+        db.prepare(`DELETE FROM ${t.operation_checkpoints} WHERE stream_id = ?`).run(id);
+
+        // Delete review blocks and stack entries for this stream
+        // Stack entries cascade delete from review_blocks
+        db.prepare(`DELETE FROM ${t.review_blocks} WHERE stream_id = ?`).run(id);
+
+        // Delete stack configs for this stream
+        db.prepare(`DELETE FROM ${t.stack_configs} WHERE stream_id = ?`).run(id);
+
+        // Finally, delete the archived stream record
+        db.prepare(`DELETE FROM ${t.archived_streams} WHERE id = ?`).run(id);
+      })();
+
+      result.prunedStreams++;
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      result.errors.push(`Failed to prune stream ${id}: ${errMsg}`);
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Run full garbage collection pipeline.
+ *
+ * Performs the following cleanup steps:
+ * 1. Archive merged/abandoned streams (if auto-archive is enabled)
+ * 2. Prune archived streams past retention period
+ * 3. Clean up orphaned worktrees (if deleteWorktrees is enabled)
+ * 4. Prune old snapshots (7 days default)
+ * 5. Recover incomplete operations (clear stale checkpoints)
+ * 6. Release stale locks
+ *
+ * @param db - Database connection
+ * @param repoPath - Path to the git repository
+ * @returns GC result with summary of all actions taken
+ */
+export function gc(
+  db: Database.Database,
+  repoPath: string
+): GCResult {
+  const config = getGCConfig(db);
+  const t = getTables(db);
+
+  const result: GCResult = {
+    archivedStreams: 0,
+    prunedStreams: 0,
+    prunedSnapshots: 0,
+    cleanedWorktrees: 0,
+    recoveredOperations: 0,
+    releasedLocks: 0,
+    errors: [],
+  };
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Step 1: Archive merged/abandoned streams (if auto-archive enabled)
+  // ─────────────────────────────────────────────────────────────────────────
+  try {
+    // Find streams that should be archived
+    const streamsToArchive: Array<{ id: string; status: string }> = [];
+
+    if (config.autoArchiveOnMerge) {
+      const merged = db
+        .prepare(`SELECT id, status FROM ${t.streams} WHERE status = 'merged'`)
+        .all() as Array<{ id: string; status: string }>;
+      streamsToArchive.push(...merged);
+    }
+
+    if (config.autoArchiveOnAbandon) {
+      const abandoned = db
+        .prepare(`SELECT id, status FROM ${t.streams} WHERE status = 'abandoned'`)
+        .all() as Array<{ id: string; status: string }>;
+      streamsToArchive.push(...abandoned);
+    }
+
+    for (const stream of streamsToArchive) {
+      try {
+        archiveStream(db, repoPath, stream.id);
+        result.archivedStreams++;
+      } catch (error) {
+        const errMsg = error instanceof Error ? error.message : String(error);
+        result.errors.push(`Failed to archive stream ${stream.id}: ${errMsg}`);
+      }
+    }
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    result.errors.push(`Archive phase failed: ${errMsg}`);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Step 2: Prune archived streams past retention period
+  // ─────────────────────────────────────────────────────────────────────────
+  try {
+    const pruneResult = prune(db, repoPath);
+    result.prunedStreams = pruneResult.prunedStreams;
+    result.errors.push(...pruneResult.errors);
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    result.errors.push(`Prune phase failed: ${errMsg}`);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Step 3: Clean up orphaned worktrees
+  // ─────────────────────────────────────────────────────────────────────────
+  if (config.deleteWorktrees) {
+    try {
+      // Prune stale worktree references using git worktree prune
+      git.pruneWorktrees({ cwd: repoPath });
+      result.cleanedWorktrees = 1; // Mark as cleaned (git doesn't report count)
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      result.errors.push(`Worktree cleanup failed: ${errMsg}`);
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Step 4: Prune old snapshots (7 days default)
+  // ─────────────────────────────────────────────────────────────────────────
+  try {
+    const snapshotRetentionDays = 7;
+    result.prunedSnapshots = snapshots.pruneSnapshots(db, snapshotRetentionDays);
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    result.errors.push(`Snapshot cleanup failed: ${errMsg}`);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Step 5: Recover incomplete operations
+  // ─────────────────────────────────────────────────────────────────────────
+  try {
+    // Get all incomplete checkpoints
+    const incompleteCheckpoints = recovery.getIncompleteCheckpoints(db);
+    for (const checkpoint of incompleteCheckpoints) {
+      try {
+        // Complete (remove) the checkpoint without recovery since we don't have worktree info
+        // In a full recovery, we would need the worktree path to reset git state
+        recovery.completeCheckpoint(db, checkpoint.operationId);
+        result.recoveredOperations++;
+      } catch (error) {
+        const errMsg = error instanceof Error ? error.message : String(error);
+        result.errors.push(
+          `Failed to clean checkpoint ${checkpoint.operationId}: ${errMsg}`
+        );
+      }
+    }
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    result.errors.push(`Operation recovery failed: ${errMsg}`);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Step 6: Release stale locks
+  // ─────────────────────────────────────────────────────────────────────────
+  try {
+    // Release locks older than 1 hour (likely from crashed processes)
+    const staleLockThreshold = Date.now() - 60 * 60 * 1000;
+
+    const staleLocksResult = db
+      .prepare(`DELETE FROM ${t.stream_locks} WHERE acquired_at < ?`)
+      .run(staleLockThreshold);
+
+    result.releasedLocks = staleLocksResult.changes;
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    result.errors.push(`Lock cleanup failed: ${errMsg}`);
+  }
+
+  return result;
 }
