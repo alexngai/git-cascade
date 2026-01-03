@@ -41,5 +41,8 @@ export * as recovery from './recovery.js';
 // Guards (low-level API)
 export * as guards from './guards.js';
 
+// Snapshots (low-level API)
+export * as snapshots from './snapshots.js';
+
 // Errors
 export * from './errors.js';

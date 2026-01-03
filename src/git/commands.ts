@@ -729,3 +729,119 @@ export function commitWithChangeId(
 
   return { commit: commitHash, changeId };
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Stash Operations
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Push changes to the stash with an optional message.
+ *
+ * Creates a new stash entry with all uncommitted changes (both staged
+ * and unstaged), including untracked files. The working directory will
+ * be clean after this operation.
+ *
+ * @param message - Optional descriptive message for the stash
+ * @param options - Git options including cwd
+ */
+export function stashPush(message: string | undefined, options: GitOptions): void {
+  // Use --include-untracked to capture new files
+  if (message) {
+    git(['stash', 'push', '--include-untracked', '-m', message], options);
+  } else {
+    git(['stash', 'push', '--include-untracked'], options);
+  }
+}
+
+/**
+ * Get the commit hash of the most recent stash entry.
+ *
+ * Uses `git stash list` format to get the stash ref, which is more
+ * portable than parsing refs/stash directly.
+ *
+ * @param options - Git options including cwd
+ * @returns The commit hash of the most recent stash entry
+ * @throws GitOperationError if no stash entries exist
+ */
+export function getLatestStashRef(options: GitOptions): string {
+  // Use stash list with format to get the commit hash
+  // This is more reliable than rev-parse stash@{0} which can have shell escaping issues
+  const output = git(['stash', 'list', '-1', '--format=%H'], options);
+  if (!output) {
+    throw new GitOperationError('No stash entries exist');
+  }
+  return output.trim();
+}
+
+/**
+ * Apply a stash by its ref (commit hash).
+ *
+ * Applies the stash to the working directory without removing it from
+ * the stash list. Use the commit hash rather than stash@{n} index for
+ * reliable long-term references.
+ *
+ * @param stashRef - The commit hash of the stash to apply
+ * @param options - Git options including cwd
+ * @throws GitOperationError if the stash cannot be applied (e.g., conflicts)
+ */
+export function stashApply(stashRef: string, options: GitOptions): void {
+  git(['stash', 'apply', stashRef], options);
+}
+
+/**
+ * Drop a stash by its ref (commit hash).
+ *
+ * Removes the stash entry from the stash list. Note that this finds
+ * the stash by its commit hash, which may not work if the stash has
+ * already been dropped or expired.
+ *
+ * @param stashRef - The commit hash of the stash to drop
+ * @param options - Git options including cwd
+ */
+export function stashDrop(stashRef: string, options: GitOptions): void {
+  // Find the stash index that matches this ref
+  // We need to iterate through stash list to find matching commit
+  const list = stashList(options);
+  const index = list.findIndex((entry) => entry.ref === stashRef);
+  if (index >= 0) {
+    git(['stash', 'drop', `stash@{${index}}`], options);
+  }
+}
+
+/**
+ * Stash list entry.
+ */
+export interface StashEntry {
+  /** Index in the stash list (0 is most recent) */
+  index: number;
+  /** Commit hash of the stash */
+  ref: string;
+  /** Stash message */
+  message: string;
+}
+
+/**
+ * List all stash entries.
+ *
+ * @param options - Git options including cwd
+ * @returns Array of stash entries, newest first
+ */
+export function stashList(options: GitOptions): StashEntry[] {
+  try {
+    // Format: commit hash, then message
+    const output = git(['stash', 'list', '--format=%H %s'], options);
+    if (!output) {
+      return [];
+    }
+
+    return output.split('\n').filter(Boolean).map((line, index) => {
+      const spaceIdx = line.indexOf(' ');
+      const ref = line.slice(0, spaceIdx);
+      const message = line.slice(spaceIdx + 1);
+      return { index, ref, message };
+    });
+  } catch {
+    // No stash entries
+    return [];
+  }
+}
