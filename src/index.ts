@@ -44,5 +44,11 @@ export * as guards from './guards.js';
 // Snapshots (low-level API)
 export * as snapshots from './snapshots.js';
 
+// Reconciliation (low-level API)
+export * as reconcile from './reconcile.js';
+
+// Merge Queue (low-level API)
+export * as mergeQueue from './merge-queue.js';
+
 // Errors
 export * from './errors.js';

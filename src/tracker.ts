@@ -17,6 +17,8 @@ import * as changes from './changes.js';
 import * as git from './git/index.js';
 import * as recovery from './recovery.js';
 import * as gc from './gc.js';
+import * as reconcile from './reconcile.js';
+import * as mergeQueue from './merge-queue.js';
 import type {
   Stream,
   StreamStatus,
@@ -151,7 +153,11 @@ export class MultiAgentRepoTracker {
   }
 
   getStreamHead(streamId: string): string {
-    return streams.getStreamHead(this.repoPath, streamId);
+    return streams.getStreamHead(this.db, this.repoPath, streamId);
+  }
+
+  getStreamBranchName(streamId: string): string {
+    return streams.getStreamBranchName(this.db, streamId);
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -480,5 +486,110 @@ export class MultiAgentRepoTracker {
    */
   healthCheck(): recovery.HealthCheckResult {
     return recovery.healthCheck(this.db, this.repoPath);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Reconciliation
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Check if a stream is in sync with its git branch.
+   */
+  checkStreamSync(streamId: string): reconcile.StreamSyncStatus {
+    return reconcile.checkStreamSync(this.db, this.repoPath, streamId);
+  }
+
+  /**
+   * Check all active streams for sync status.
+   */
+  checkAllStreamsSync(options?: {
+    streamIds?: string[];
+  }): reconcile.ReconcileCheckResult {
+    return reconcile.checkAllStreams(this.db, this.repoPath, options);
+  }
+
+  /**
+   * Reconcile database state with git state.
+   */
+  reconcile(options?: reconcile.ReconcileOptions): reconcile.ReconcileResult {
+    return reconcile.reconcile(this.db, this.repoPath, options);
+  }
+
+  /**
+   * Ensure a stream is in sync before performing an operation.
+   * @throws DesyncError if stream is out of sync (unless force is true)
+   */
+  ensureStreamInSync(streamId: string, options?: { force?: boolean }): void {
+    reconcile.ensureInSync(this.db, this.repoPath, streamId, options);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Merge Queue
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Add a stream to the merge queue.
+   */
+  addToMergeQueue(options: mergeQueue.AddToQueueOptions): string {
+    return mergeQueue.addToQueue(this.db, options);
+  }
+
+  /**
+   * Get a merge queue entry by ID.
+   */
+  getMergeQueueEntry(entryId: string): mergeQueue.MergeQueueEntry | null {
+    return mergeQueue.getQueueEntry(this.db, entryId);
+  }
+
+  /**
+   * Get the merge queue for a target branch.
+   */
+  getMergeQueue(options?: {
+    targetBranch?: string;
+    status?: mergeQueue.MergeQueueStatus | mergeQueue.MergeQueueStatus[];
+  }): mergeQueue.MergeQueueEntry[] {
+    return mergeQueue.getQueue(this.db, options);
+  }
+
+  /**
+   * Mark a queue entry as ready for merging.
+   */
+  markMergeQueueReady(entryId: string): void {
+    mergeQueue.markReady(this.db, entryId);
+  }
+
+  /**
+   * Cancel a merge queue entry.
+   */
+  cancelMergeQueueEntry(entryId: string): void {
+    mergeQueue.cancelQueueEntry(this.db, entryId);
+  }
+
+  /**
+   * Remove an entry from the merge queue.
+   */
+  removeFromMergeQueue(entryId: string): void {
+    mergeQueue.removeFromQueue(this.db, entryId);
+  }
+
+  /**
+   * Get the next entry to process from the queue.
+   */
+  getNextToMerge(targetBranch?: string): mergeQueue.MergeQueueEntry | null {
+    return mergeQueue.getNextToMerge(this.db, targetBranch);
+  }
+
+  /**
+   * Process the merge queue.
+   */
+  processMergeQueue(options: mergeQueue.ProcessQueueOptions): mergeQueue.ProcessQueueResult {
+    return mergeQueue.processQueue(this.db, this.repoPath, options);
+  }
+
+  /**
+   * Get queue position for a stream.
+   */
+  getMergeQueuePosition(streamId: string, targetBranch?: string): number | null {
+    return mergeQueue.getQueuePosition(this.db, streamId, targetBranch);
   }
 }

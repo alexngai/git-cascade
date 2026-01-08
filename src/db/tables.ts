@@ -20,6 +20,7 @@ export interface TableNames {
   archived_streams: string;
   gc_config: string;
   operation_checkpoints: string;
+  merge_queue: string;
 }
 
 /**
@@ -47,6 +48,7 @@ export function getTableNames(prefix: string = ''): TableNames {
     archived_streams: `${prefix}archived_streams`,
     gc_config: `${prefix}gc_config`,
     operation_checkpoints: `${prefix}operation_checkpoints`,
+    merge_queue: `${prefix}merge_queue`,
   };
 }
 

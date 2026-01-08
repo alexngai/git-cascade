@@ -16,6 +16,7 @@ import type {
   WorktreeProviderOptions,
 } from './models/index.js';
 import * as git from './git/index.js';
+import * as streams from './streams.js';
 import { WorktreeError } from './errors.js';
 
 /**
@@ -105,6 +106,9 @@ export function getWorktree(
 
 /**
  * Update the stream checked out in an agent's worktree.
+ *
+ * For normal streams, checks out `stream/{id}`.
+ * For local mode streams, checks out the existing branch name.
  */
 export function updateWorktreeStream(
   db: Database.Database,
@@ -120,8 +124,8 @@ export function updateWorktreeStream(
   const now = Date.now();
 
   if (streamId) {
-    // Checkout the stream branch in the worktree
-    const branchName = `stream/${streamId}`;
+    // Get the branch name from the stream (handles local mode)
+    const branchName = streams.getStreamBranchName(db, streamId);
     try {
       git.checkout(branchName, { cwd: worktree.path });
     } catch (error) {
@@ -231,10 +235,12 @@ export function findStaleWorktrees(
 /**
  * Create a worktree provider for cascade rebase operations.
  *
+ * @param db - Database connection for stream lookups
  * @param repoPath - Path to the main repository
  * @param options - Provider configuration
  */
 export function createWorktreeProvider(
+  db: Database.Database,
   repoPath: string,
   options: WorktreeProviderOptions
 ): WorktreeProvider {
@@ -242,9 +248,9 @@ export function createWorktreeProvider(
     case 'callback':
       return createCallbackProvider(options);
     case 'temporary':
-      return createTemporaryProvider(repoPath, options);
+      return createTemporaryProvider(db, repoPath, options);
     case 'sequential':
-      return createSequentialProvider(repoPath, options);
+      return createSequentialProvider(db, repoPath, options);
     default:
       throw new WorktreeError(`Unknown worktree mode: ${options.mode}`);
   }
@@ -276,6 +282,7 @@ function createCallbackProvider(options: WorktreeProviderOptions): WorktreeProvi
  * Creates a new temporary worktree for each stream, cleans up when done.
  */
 function createTemporaryProvider(
+  db: Database.Database,
   repoPath: string,
   options: WorktreeProviderOptions
 ): WorktreeProvider {
@@ -284,7 +291,8 @@ function createTemporaryProvider(
 
   return {
     getWorktree(streamId: string): string {
-      const branchName = `stream/${streamId}`;
+      // Get the branch name from the stream (handles local mode)
+      const branchName = streams.getStreamBranchName(db, streamId);
       const worktreePath = path.join(tempDir, `cascade-wt-${streamId}-${Date.now()}`);
 
       // Create the temporary worktree
@@ -327,6 +335,7 @@ function createTemporaryProvider(
  * Reuses a single worktree, checking out each stream in turn.
  */
 function createSequentialProvider(
+  db: Database.Database,
   _repoPath: string,
   options: WorktreeProviderOptions
 ): WorktreeProvider {
@@ -337,7 +346,8 @@ function createSequentialProvider(
 
   return {
     getWorktree(streamId: string): string {
-      const branchName = `stream/${streamId}`;
+      // Get the branch name from the stream (handles local mode)
+      const branchName = streams.getStreamBranchName(db, streamId);
 
       // Checkout the stream branch in the existing worktree
       git.checkout(branchName, { cwd: worktreePath });

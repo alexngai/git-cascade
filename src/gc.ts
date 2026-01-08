@@ -68,6 +68,10 @@ export interface ArchivedStream {
   enableStackedReview: boolean;
   /** Extensible metadata */
   metadata: Record<string, unknown>;
+  /** Name of existing branch being tracked (for local mode) */
+  existingBranch: string | null;
+  /** Whether this stream was in local mode (tracking existing branch) */
+  isLocalMode: boolean;
 }
 
 /**
@@ -215,6 +219,8 @@ function rowToArchivedStream(row: Record<string, unknown>): ArchivedStream {
     mergedInto: row.merged_into as string | null,
     enableStackedReview: Boolean(row.enable_stacked_review),
     metadata: JSON.parse((row.metadata as string) || '{}'),
+    existingBranch: row.existing_branch as string | null,
+    isLocalMode: Boolean(row.is_local_mode),
   };
 }
 
@@ -257,8 +263,9 @@ export function archiveStream(
     db.prepare(`
       INSERT INTO ${t.archived_streams} (
         id, name, agent_id, base_commit, parent_stream, status,
-        created_at, updated_at, archived_at, merged_into, enable_stacked_review, metadata
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        created_at, updated_at, archived_at, merged_into, enable_stacked_review, metadata,
+        existing_branch, is_local_mode
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       row.id,
       row.name,
@@ -271,7 +278,9 @@ export function archiveStream(
       now,
       row.merged_into,
       row.enable_stacked_review,
-      row.metadata
+      row.metadata,
+      row.existing_branch,
+      row.is_local_mode
     );
 
     // Delete from streams table
@@ -424,14 +433,16 @@ export function prune(
   };
 
   // Get all archived streams older than (or equal to for threshold=0) the threshold
+  // Include is_local_mode to determine whether we should delete the branch
   const oldStreams = db
-    .prepare(`SELECT id FROM ${t.archived_streams} WHERE archived_at < ?`)
-    .all(cutoffMs) as Array<{ id: string }>;
+    .prepare(`SELECT id, is_local_mode FROM ${t.archived_streams} WHERE archived_at < ?`)
+    .all(cutoffMs) as Array<{ id: string; is_local_mode: number }>;
 
-  for (const { id } of oldStreams) {
+  for (const { id, is_local_mode } of oldStreams) {
     try {
-      // Delete git branch if configured
-      if (config.deleteGitBranches) {
+      // Delete git branch if configured and NOT in local mode
+      // Local mode streams track existing branches that we should never delete
+      if (config.deleteGitBranches && !is_local_mode) {
         const branchName = `stream/${id}`;
         try {
           git.deleteBranch(branchName, true, { cwd: repoPath });

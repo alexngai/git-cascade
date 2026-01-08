@@ -81,7 +81,7 @@ export function cascadeRebase(
   const ordered = deps.topologicalSort(db, dependents);
 
   // Create worktree provider
-  const provider = createWorktreeProvider(repoPath, worktreeOptions);
+  const provider = createWorktreeProvider(db, repoPath, worktreeOptions);
 
   const results: Record<string, RebaseResult> = {};
   const failed: string[] = [];
@@ -332,7 +332,7 @@ export function resumeCascade(
   const ordered = deps.topologicalSort(db, Array.from(allDependents));
 
   // Create worktree provider
-  const provider = createWorktreeProvider(repoPath, worktreeOptions);
+  const provider = createWorktreeProvider(db, repoPath, worktreeOptions);
 
   try {
     for (const streamId of ordered) {

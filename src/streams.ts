@@ -76,11 +76,16 @@ function rowToStream(row: Record<string, unknown>): Stream {
     mergedInto: row.merged_into as string | null,
     enableStackedReview: Boolean(row.enable_stacked_review),
     metadata: JSON.parse((row.metadata as string) || '{}'),
+    existingBranch: row.existing_branch as string | null,
+    isLocalMode: Boolean(row.is_local_mode),
   };
 }
 
 /**
  * Create a new stream.
+ *
+ * By default, creates a new git branch `stream/<id>`. When `existingBranch` is
+ * provided with `createBranch: false`, tracks an existing branch instead (local mode).
  */
 export function createStream(
   db: Database.Database,
@@ -89,22 +94,36 @@ export function createStream(
 ): string {
   const streamId = generateStreamId();
   const now = Date.now();
-  const base = options.base ?? 'main';
   const t = getTables(db);
 
-  // Resolve base to commit hash
-  const baseCommit = git.resolveRef(base, { cwd: repoPath });
+  // Determine if we're in local mode (tracking existing branch)
+  const isLocalMode = options.existingBranch !== undefined && options.createBranch === false;
+  const existingBranch = isLocalMode ? options.existingBranch! : null;
 
-  // Create git branch
-  const branchName = `stream/${streamId}`;
-  git.createBranch(branchName, baseCommit, { cwd: repoPath });
+  // Resolve base commit
+  let baseCommit: string;
+  if (isLocalMode && existingBranch) {
+    // For local mode, base is the current HEAD of the existing branch
+    baseCommit = git.resolveRef(existingBranch, { cwd: repoPath });
+  } else {
+    // For normal mode, resolve base option
+    const base = options.base ?? 'main';
+    baseCommit = git.resolveRef(base, { cwd: repoPath });
+  }
+
+  // Create git branch only if not in local mode
+  if (!isLocalMode) {
+    const branchName = `stream/${streamId}`;
+    git.createBranch(branchName, baseCommit, { cwd: repoPath });
+  }
 
   // Insert into database
   db.prepare(`
     INSERT INTO ${t.streams} (
       id, name, agent_id, base_commit, parent_stream, status,
-      created_at, updated_at, merged_into, enable_stacked_review, metadata
-    ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, NULL, ?, ?)
+      created_at, updated_at, merged_into, enable_stacked_review, metadata,
+      existing_branch, is_local_mode
+    ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, NULL, ?, ?, ?, ?)
   `).run(
     streamId,
     options.name,
@@ -114,7 +133,9 @@ export function createStream(
     now,
     now,
     options.enableStackedReview ? 1 : 0,
-    JSON.stringify(options.metadata ?? {})
+    JSON.stringify(options.metadata ?? {}),
+    existingBranch,
+    isLocalMode ? 1 : 0
   );
 
   return streamId;
@@ -453,14 +474,43 @@ export function mergeStream(
 
 /**
  * Get the current head commit of a stream.
+ *
+ * For local mode streams, returns the HEAD of the existing branch.
+ * For normal streams, returns the HEAD of stream/<id>.
  */
-export function getStreamHead(repoPath: string, streamId: string): string {
-  const branchName = `stream/${streamId}`;
+export function getStreamHead(
+  db: Database.Database,
+  repoPath: string,
+  streamId: string
+): string {
+  const stream = getStream(db, streamId);
+
+  // Determine branch name based on mode
+  const branchName = stream?.isLocalMode && stream.existingBranch
+    ? stream.existingBranch
+    : `stream/${streamId}`;
+
   try {
     return git.resolveRef(branchName, { cwd: repoPath });
   } catch {
     throw new BranchNotFoundError(branchName);
   }
+}
+
+/**
+ * Get the branch name for a stream.
+ *
+ * For local mode streams, returns the existing branch name.
+ * For normal streams, returns stream/<id>.
+ */
+export function getStreamBranchName(
+  db: Database.Database,
+  streamId: string
+): string {
+  const stream = getStream(db, streamId);
+  return stream?.isLocalMode && stream.existingBranch
+    ? stream.existingBranch
+    : `stream/${streamId}`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -69,6 +69,8 @@ function initializeSchema(db: Database.Database, prefix: string): void {
       merged_into TEXT,
       enable_stacked_review INTEGER NOT NULL DEFAULT 0,
       metadata TEXT NOT NULL DEFAULT '{}',
+      existing_branch TEXT,
+      is_local_mode INTEGER NOT NULL DEFAULT 0,
       FOREIGN KEY (parent_stream) REFERENCES ${prefix}streams(id)
     );
 
@@ -210,7 +212,9 @@ function initializeSchema(db: Database.Database, prefix: string): void {
       archived_at INTEGER NOT NULL,
       merged_into TEXT,
       enable_stacked_review INTEGER NOT NULL DEFAULT 0,
-      metadata TEXT NOT NULL DEFAULT '{}'
+      metadata TEXT NOT NULL DEFAULT '{}',
+      existing_branch TEXT,
+      is_local_mode INTEGER NOT NULL DEFAULT 0
     );
 
     -- GC configuration table
@@ -232,6 +236,22 @@ function initializeSchema(db: Database.Database, prefix: string): void {
       FOREIGN KEY (stream_id) REFERENCES ${prefix}streams(id)
     );
 
+    -- Merge queue table
+    CREATE TABLE IF NOT EXISTS ${prefix}merge_queue (
+      id TEXT PRIMARY KEY,
+      stream_id TEXT NOT NULL,
+      target_branch TEXT NOT NULL,
+      priority INTEGER NOT NULL DEFAULT 100,
+      status TEXT NOT NULL DEFAULT 'pending',
+      added_by TEXT NOT NULL,
+      added_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      error TEXT,
+      merge_commit TEXT,
+      metadata TEXT NOT NULL DEFAULT '{}',
+      FOREIGN KEY (stream_id) REFERENCES ${prefix}streams(id)
+    );
+
     -- Indexes
     CREATE INDEX IF NOT EXISTS ${prefix}idx_streams_agent ON ${prefix}streams(agent_id);
     CREATE INDEX IF NOT EXISTS ${prefix}idx_streams_status ON ${prefix}streams(status);
@@ -248,6 +268,9 @@ function initializeSchema(db: Database.Database, prefix: string): void {
     CREATE INDEX IF NOT EXISTS ${prefix}idx_changes_current_commit ON ${prefix}changes(current_commit);
     CREATE INDEX IF NOT EXISTS ${prefix}idx_conflicts_stream ON ${prefix}conflicts(stream_id);
     CREATE INDEX IF NOT EXISTS ${prefix}idx_conflicts_status ON ${prefix}conflicts(status);
+    CREATE INDEX IF NOT EXISTS ${prefix}idx_merge_queue_stream ON ${prefix}merge_queue(stream_id);
+    CREATE INDEX IF NOT EXISTS ${prefix}idx_merge_queue_target ON ${prefix}merge_queue(target_branch, status);
+    CREATE INDEX IF NOT EXISTS ${prefix}idx_merge_queue_priority ON ${prefix}merge_queue(target_branch, priority, added_at);
   `);
 }
 
