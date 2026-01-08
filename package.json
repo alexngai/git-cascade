@@ -1,6 +1,6 @@
 {
   "name": "dataplane",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Multi-agent git tracking system for coordinating AI agents on shared codebases",
   "type": "module",
   "main": "./dist/index.js",
