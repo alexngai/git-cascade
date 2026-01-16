@@ -21,6 +21,7 @@ export interface TableNames {
   gc_config: string;
   operation_checkpoints: string;
   merge_queue: string;
+  stream_merges: string;
 }
 
 /**
@@ -49,6 +50,7 @@ export function getTableNames(prefix: string = ''): TableNames {
     gc_config: `${prefix}gc_config`,
     operation_checkpoints: `${prefix}operation_checkpoints`,
     merge_queue: `${prefix}merge_queue`,
+    stream_merges: `${prefix}stream_merges`,
   };
 }
 

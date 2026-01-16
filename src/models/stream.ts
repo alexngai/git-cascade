@@ -17,6 +17,8 @@ export interface Stream {
   baseCommit: string;
   /** ID of parent stream if forked */
   parentStream: string | null;
+  /** Commit SHA where this stream branched from its parent (for DAG tracking) */
+  branchPointCommit: string | null;
   /** Current status */
   status: StreamStatus;
   /** Unix timestamp (ms) when created */
@@ -42,6 +44,11 @@ export interface CreateStreamOptions {
   base?: string;
   /** Parent stream ID if forking */
   parentStream?: string;
+  /**
+   * Commit SHA where this stream branched from its parent.
+   * Used for DAG tracking to identify the exact point of divergence.
+   */
+  branchPointCommit?: string;
   /** Enable stacked review workflow */
   enableStackedReview?: boolean;
   /** Additional metadata */
@@ -232,4 +239,45 @@ export interface StreamNode {
   children: StreamNode[];
   /** IDs of streams this stream depends on */
   dependencies: string[];
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Stream Merge Types (DAG Tracking)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Record of a merge event between two streams.
+ * Used for DAG tracking to capture when streams are merged.
+ */
+export interface StreamMerge {
+  /** Unique identifier for this merge event */
+  id: string;
+  /** Stream that was merged FROM (source) */
+  sourceStreamId: string;
+  /** Commit SHA in the source stream that was merged */
+  sourceCommit: string;
+  /** Stream that was merged INTO (target) */
+  targetStreamId: string;
+  /** Resulting merge commit SHA in the target */
+  mergeCommit: string;
+  /** Unix timestamp (ms) when merge was recorded */
+  createdAt: number;
+  /** Extensible metadata */
+  metadata: Record<string, unknown>;
+}
+
+/**
+ * Options for recording a stream merge event.
+ */
+export interface RecordMergeOptions {
+  /** Stream that was merged FROM (source) */
+  sourceStreamId: string;
+  /** Commit SHA in the source stream that was merged */
+  sourceCommit: string;
+  /** Stream that was merged INTO (target) */
+  targetStreamId: string;
+  /** Resulting merge commit SHA in the target */
+  mergeCommit: string;
+  /** Optional metadata */
+  metadata?: Record<string, unknown>;
 }

@@ -5,6 +5,7 @@
  */
 
 import Database from 'better-sqlite3';
+import { runDataplaneMigrations } from './migrations.js';
 
 export interface DatabaseOptions {
   /** Path to SQLite database file (ignored if db is provided) */
@@ -63,6 +64,7 @@ function initializeSchema(db: Database.Database, prefix: string): void {
       agent_id TEXT NOT NULL,
       base_commit TEXT NOT NULL,
       parent_stream TEXT,
+      branch_point_commit TEXT,
       status TEXT NOT NULL DEFAULT 'active',
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
@@ -252,6 +254,19 @@ function initializeSchema(db: Database.Database, prefix: string): void {
       FOREIGN KEY (stream_id) REFERENCES ${prefix}streams(id)
     );
 
+    -- Stream merges table (DAG merge events)
+    CREATE TABLE IF NOT EXISTS ${prefix}stream_merges (
+      id TEXT PRIMARY KEY,
+      source_stream_id TEXT NOT NULL,
+      source_commit TEXT NOT NULL,
+      target_stream_id TEXT NOT NULL,
+      merge_commit TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      metadata TEXT NOT NULL DEFAULT '{}',
+      FOREIGN KEY (source_stream_id) REFERENCES ${prefix}streams(id),
+      FOREIGN KEY (target_stream_id) REFERENCES ${prefix}streams(id)
+    );
+
     -- Indexes
     CREATE INDEX IF NOT EXISTS ${prefix}idx_streams_agent ON ${prefix}streams(agent_id);
     CREATE INDEX IF NOT EXISTS ${prefix}idx_streams_status ON ${prefix}streams(status);
@@ -271,7 +286,12 @@ function initializeSchema(db: Database.Database, prefix: string): void {
     CREATE INDEX IF NOT EXISTS ${prefix}idx_merge_queue_stream ON ${prefix}merge_queue(stream_id);
     CREATE INDEX IF NOT EXISTS ${prefix}idx_merge_queue_target ON ${prefix}merge_queue(target_branch, status);
     CREATE INDEX IF NOT EXISTS ${prefix}idx_merge_queue_priority ON ${prefix}merge_queue(target_branch, priority, added_at);
+    CREATE INDEX IF NOT EXISTS ${prefix}idx_stream_merges_source ON ${prefix}stream_merges(source_stream_id);
+    CREATE INDEX IF NOT EXISTS ${prefix}idx_stream_merges_target ON ${prefix}stream_merges(target_stream_id);
   `);
+
+  // Run versioned migrations for existing databases
+  runDataplaneMigrations(db, prefix);
 }
 
 /**

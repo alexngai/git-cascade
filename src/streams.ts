@@ -16,6 +16,8 @@ import type {
   RebaseResult,
   ConflictInfo,
   StreamNode,
+  StreamMerge,
+  RecordMergeOptions,
 } from './models/index.js';
 import * as git from './git/index.js';
 import * as stacks from './stacks.js';
@@ -70,6 +72,7 @@ function rowToStream(row: Record<string, unknown>): Stream {
     agentId: row.agent_id as string,
     baseCommit: row.base_commit as string,
     parentStream: row.parent_stream as string | null,
+    branchPointCommit: row.branch_point_commit as string | null,
     status: row.status as StreamStatus,
     createdAt: row.created_at as number,
     updatedAt: row.updated_at as number,
@@ -117,19 +120,25 @@ export function createStream(
     git.createBranch(branchName, baseCommit, { cwd: repoPath });
   }
 
+  // Determine branch point commit
+  // If not provided explicitly, use baseCommit when parentStream is set
+  const branchPointCommit = options.branchPointCommit ??
+    (options.parentStream ? baseCommit : null);
+
   // Insert into database
   db.prepare(`
     INSERT INTO ${t.streams} (
-      id, name, agent_id, base_commit, parent_stream, status,
+      id, name, agent_id, base_commit, parent_stream, branch_point_commit, status,
       created_at, updated_at, merged_into, enable_stacked_review, metadata,
       existing_branch, is_local_mode
-    ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, NULL, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, NULL, ?, ?, ?, ?)
   `).run(
     streamId,
     options.name,
     options.agentId,
     baseCommit,
     options.parentStream ?? null,
+    branchPointCommit,
     now,
     now,
     options.enableStackedReview ? 1 : 0,
@@ -1332,4 +1341,176 @@ export function getStreamGraph(
   // Return forest of all root streams
   const roots = getRootStreams(db);
   return roots.map((stream) => buildStreamNode(db, stream));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Stream DAG Operations (Lineage & Merge Tracking)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Get the full lineage of a stream (all ancestors from root to this stream).
+ *
+ * Returns an array of streams starting from the root (oldest ancestor) and
+ * ending with the specified stream.
+ *
+ * @param streamId - The stream to get lineage for
+ * @returns Array of streams from root to this stream, or just this stream if no parents
+ */
+export function getStreamLineage(
+  db: Database.Database,
+  streamId: string
+): Stream[] {
+  const lineage: Stream[] = [];
+  let current = getStream(db, streamId);
+
+  while (current) {
+    lineage.push(current);
+    if (current.parentStream) {
+      current = getStream(db, current.parentStream);
+    } else {
+      break;
+    }
+  }
+
+  // Return root-first order
+  return lineage.reverse();
+}
+
+/**
+ * Convert database row to StreamMerge object.
+ */
+function rowToStreamMerge(row: Record<string, unknown>): StreamMerge {
+  return {
+    id: row.id as string,
+    sourceStreamId: row.source_stream_id as string,
+    sourceCommit: row.source_commit as string,
+    targetStreamId: row.target_stream_id as string,
+    mergeCommit: row.merge_commit as string,
+    createdAt: row.created_at as number,
+    metadata: JSON.parse((row.metadata as string) || '{}'),
+  };
+}
+
+/**
+ * Record a merge event between two streams.
+ *
+ * This creates an edge in the stream DAG indicating that changes from
+ * the source stream were merged into the target stream.
+ *
+ * @param options - Merge recording options
+ * @returns The ID of the created merge record
+ */
+export function recordMerge(
+  db: Database.Database,
+  options: RecordMergeOptions
+): string {
+  const t = getTables(db);
+  const id = crypto.randomUUID().slice(0, 8);
+  const now = Date.now();
+
+  // Verify both streams exist
+  getStreamOrThrow(db, options.sourceStreamId);
+  getStreamOrThrow(db, options.targetStreamId);
+
+  db.prepare(`
+    INSERT INTO ${t.stream_merges} (
+      id, source_stream_id, source_commit, target_stream_id, merge_commit,
+      created_at, metadata
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id,
+    options.sourceStreamId,
+    options.sourceCommit,
+    options.targetStreamId,
+    options.mergeCommit,
+    now,
+    JSON.stringify(options.metadata ?? {})
+  );
+
+  return id;
+}
+
+/**
+ * Get a merge record by ID.
+ */
+export function getStreamMerge(
+  db: Database.Database,
+  mergeId: string
+): StreamMerge | null {
+  const t = getTables(db);
+  const row = db
+    .prepare(`SELECT * FROM ${t.stream_merges} WHERE id = ?`)
+    .get(mergeId) as Record<string, unknown> | undefined;
+
+  return row ? rowToStreamMerge(row) : null;
+}
+
+/**
+ * Get all merge events involving a stream (as source or target).
+ *
+ * @param streamId - The stream to get merges for
+ * @param options - Optional filters
+ * @returns Array of StreamMerge records, ordered by creation time
+ */
+export function getStreamMerges(
+  db: Database.Database,
+  streamId: string,
+  options?: { asSource?: boolean; asTarget?: boolean }
+): StreamMerge[] {
+  const t = getTables(db);
+  const asSource = options?.asSource ?? true;
+  const asTarget = options?.asTarget ?? true;
+
+  if (!asSource && !asTarget) {
+    return [];
+  }
+
+  let query: string;
+  const params: string[] = [];
+
+  if (asSource && asTarget) {
+    query = `
+      SELECT * FROM ${t.stream_merges}
+      WHERE source_stream_id = ? OR target_stream_id = ?
+      ORDER BY created_at ASC
+    `;
+    params.push(streamId, streamId);
+  } else if (asSource) {
+    query = `
+      SELECT * FROM ${t.stream_merges}
+      WHERE source_stream_id = ?
+      ORDER BY created_at ASC
+    `;
+    params.push(streamId);
+  } else {
+    query = `
+      SELECT * FROM ${t.stream_merges}
+      WHERE target_stream_id = ?
+      ORDER BY created_at ASC
+    `;
+    params.push(streamId);
+  }
+
+  const rows = db.prepare(query).all(...params) as Record<string, unknown>[];
+  return rows.map(rowToStreamMerge);
+}
+
+/**
+ * Get all merges where this stream was the source (merged FROM).
+ */
+export function getMergesFromStream(
+  db: Database.Database,
+  streamId: string
+): StreamMerge[] {
+  return getStreamMerges(db, streamId, { asSource: true, asTarget: false });
+}
+
+/**
+ * Get all merges where this stream was the target (merged INTO).
+ */
+export function getMergesIntoStream(
+  db: Database.Database,
+  streamId: string
+): StreamMerge[] {
+  return getStreamMerges(db, streamId, { asSource: false, asTarget: true });
 }
