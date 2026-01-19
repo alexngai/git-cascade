@@ -133,8 +133,8 @@ export class MultiAgentRepoTracker {
     streams.updateStream(this.db, streamId, updates);
   }
 
-  abandonStream(streamId: string, reason?: string): void {
-    streams.abandonStream(this.db, streamId, reason);
+  abandonStream(streamId: string, options?: { reason?: string; cascade?: boolean }): void {
+    streams.abandonStream(this.db, streamId, options);
   }
 
   forkStream(options: ForkStreamOptions): string {

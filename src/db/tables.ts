@@ -2,7 +2,7 @@
  * Table name utilities with prefix support.
  */
 
-import type Database from 'better-sqlite3';
+import type Database from "better-sqlite3";
 
 export interface TableNames {
   streams: string;
@@ -22,6 +22,10 @@ export interface TableNames {
   operation_checkpoints: string;
   merge_queue: string;
   stream_merges: string;
+  // New tables for unified checkpoint/diff stack system (s-366r)
+  checkpoints: string;
+  diff_stacks: string;
+  diff_stack_entries: string;
 }
 
 /**
@@ -32,7 +36,7 @@ const tableRegistry = new WeakMap<Database.Database, TableNames>();
 /**
  * Get all table names with the specified prefix.
  */
-export function getTableNames(prefix: string = ''): TableNames {
+export function getTableNames(prefix: string = ""): TableNames {
   return {
     streams: `${prefix}streams`,
     operations: `${prefix}operations`,
@@ -51,13 +55,20 @@ export function getTableNames(prefix: string = ''): TableNames {
     operation_checkpoints: `${prefix}operation_checkpoints`,
     merge_queue: `${prefix}merge_queue`,
     stream_merges: `${prefix}stream_merges`,
+    // New tables for unified checkpoint/diff stack system
+    checkpoints: `${prefix}checkpoints`,
+    diff_stacks: `${prefix}diff_stacks`,
+    diff_stack_entries: `${prefix}diff_stack_entries`,
   };
 }
 
 /**
  * Register table names for a database instance.
  */
-export function registerTables(db: Database.Database, tables: TableNames): void {
+export function registerTables(
+  db: Database.Database,
+  tables: TableNames
+): void {
   tableRegistry.set(db, tables);
 }
 
@@ -66,5 +77,5 @@ export function registerTables(db: Database.Database, tables: TableNames): void 
  * Returns default (unprefixed) names if not registered.
  */
 export function getTables(db: Database.Database): TableNames {
-  return tableRegistry.get(db) ?? getTableNames('');
+  return tableRegistry.get(db) ?? getTableNames("");
 }

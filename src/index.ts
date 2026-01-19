@@ -50,5 +50,11 @@ export * as reconcile from './reconcile.js';
 // Merge Queue (low-level API)
 export * as mergeQueue from './merge-queue.js';
 
+// Checkpoints (low-level API)
+export * as checkpoints from './checkpoints.js';
+
+// Diff Stacks (low-level API)
+export * as diffStacks from './diff-stacks.js';
+
 // Errors
 export * from './errors.js';

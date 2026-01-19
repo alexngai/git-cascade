@@ -157,11 +157,66 @@ describe('Stream Operations', () => {
         agentId: 'agent-1',
       });
 
-      tracker.abandonStream(streamId, 'No longer needed');
+      tracker.abandonStream(streamId, { reason: 'No longer needed' });
 
       const stream = tracker.getStream(streamId);
       expect(stream!.status).toBe('abandoned');
       expect(stream!.metadata.abandonReason).toBe('No longer needed');
+    });
+
+    it('should cascade abandon to child streams', () => {
+      const parentId = tracker.createStream({
+        name: 'parent',
+        agentId: 'agent-1',
+      });
+
+      // Create a child stream
+      const childId = tracker.forkStream({
+        parentStreamId: parentId,
+        name: 'child',
+        agentId: 'agent-1',
+      });
+
+      // Create a grandchild stream
+      const grandchildId = tracker.forkStream({
+        parentStreamId: childId,
+        name: 'grandchild',
+        agentId: 'agent-1',
+      });
+
+      // Abandon parent with cascade
+      tracker.abandonStream(parentId, { reason: 'Done', cascade: true });
+
+      // All streams should be abandoned
+      const parent = tracker.getStream(parentId);
+      const child = tracker.getStream(childId);
+      const grandchild = tracker.getStream(grandchildId);
+
+      expect(parent!.status).toBe('abandoned');
+      expect(child!.status).toBe('abandoned');
+      expect(grandchild!.status).toBe('abandoned');
+    });
+
+    it('should not cascade by default', () => {
+      const parentId = tracker.createStream({
+        name: 'parent',
+        agentId: 'agent-1',
+      });
+
+      const childId = tracker.forkStream({
+        parentStreamId: parentId,
+        name: 'child',
+        agentId: 'agent-1',
+      });
+
+      // Abandon parent without cascade
+      tracker.abandonStream(parentId, { reason: 'Done' });
+
+      const parent = tracker.getStream(parentId);
+      const child = tracker.getStream(childId);
+
+      expect(parent!.status).toBe('abandoned');
+      expect(child!.status).toBe('active'); // Child should not be affected
     });
   });
 

@@ -290,7 +290,13 @@ describe('Dataplane Migrations', () => {
         .all() as Array<{ name: string }>;
       expect(tables.length).toBe(1);
 
-      // Rollback migration 2
+      // Rollback all migrations after migration 2 first
+      const latestVersion = getLatestDataplaneMigrationVersion();
+      for (let i = latestVersion; i > 2; i--) {
+        rollbackDataplaneMigration(db);
+      }
+
+      // Now rollback migration 2
       rollbackDataplaneMigration(db);
 
       // Verify table is dropped
@@ -391,6 +397,244 @@ describe('Dataplane Migrations', () => {
       // Check NOT NULL constraints
       expect(columnMap.get('source_stream_id')?.notnull).toBe(1);
       expect(columnMap.get('target_stream_id')?.notnull).toBe(1);
+    });
+  });
+
+  describe('migration 3: add-checkpoints-and-diff-stacks', () => {
+    beforeEach(() => {
+      db.exec(`
+        CREATE TABLE streams (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          agent_id TEXT NOT NULL,
+          base_commit TEXT NOT NULL,
+          parent_stream TEXT,
+          status TEXT NOT NULL DEFAULT 'active',
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          merged_into TEXT,
+          enable_stacked_review INTEGER NOT NULL DEFAULT 0,
+          metadata TEXT NOT NULL DEFAULT '{}',
+          existing_branch TEXT,
+          is_local_mode INTEGER NOT NULL DEFAULT 0,
+          FOREIGN KEY (parent_stream) REFERENCES streams(id)
+        );
+      `);
+    });
+
+    it('should create checkpoints table with correct schema', () => {
+      runDataplaneMigrations(db);
+
+      const columns = db.pragma('table_info(checkpoints)') as Array<{ name: string; type: string; notnull: number }>;
+      const columnMap = new Map(columns.map((c) => [c.name, c]));
+
+      expect(columnMap.has('id')).toBe(true);
+      expect(columnMap.has('stream_id')).toBe(true);
+      expect(columnMap.has('commit_sha')).toBe(true);
+      expect(columnMap.has('parent_commit')).toBe(true);
+      expect(columnMap.has('original_commit')).toBe(true);
+      expect(columnMap.has('change_id')).toBe(true);
+      expect(columnMap.has('message')).toBe(true);
+      expect(columnMap.has('created_at')).toBe(true);
+      expect(columnMap.has('created_by')).toBe(true);
+
+      // Check NOT NULL constraints
+      expect(columnMap.get('stream_id')?.notnull).toBe(1);
+      expect(columnMap.get('commit_sha')?.notnull).toBe(1);
+      expect(columnMap.get('created_at')?.notnull).toBe(1);
+    });
+
+    it('should create diff_stacks table with correct schema', () => {
+      runDataplaneMigrations(db);
+
+      const columns = db.pragma('table_info(diff_stacks)') as Array<{ name: string; type: string; notnull: number }>;
+      const columnMap = new Map(columns.map((c) => [c.name, c]));
+
+      expect(columnMap.has('id')).toBe(true);
+      expect(columnMap.has('name')).toBe(true);
+      expect(columnMap.has('description')).toBe(true);
+      expect(columnMap.has('target_branch')).toBe(true);
+      expect(columnMap.has('review_status')).toBe(true);
+      expect(columnMap.has('reviewed_by')).toBe(true);
+      expect(columnMap.has('reviewed_at')).toBe(true);
+      expect(columnMap.has('review_notes')).toBe(true);
+      expect(columnMap.has('queue_position')).toBe(true);
+      expect(columnMap.has('created_at')).toBe(true);
+      expect(columnMap.has('created_by')).toBe(true);
+
+      // Check NOT NULL constraints
+      expect(columnMap.get('target_branch')?.notnull).toBe(1);
+      expect(columnMap.get('review_status')?.notnull).toBe(1);
+      expect(columnMap.get('created_at')?.notnull).toBe(1);
+    });
+
+    it('should create diff_stack_entries table with correct schema', () => {
+      runDataplaneMigrations(db);
+
+      const columns = db.pragma('table_info(diff_stack_entries)') as Array<{ name: string; type: string; notnull: number }>;
+      const columnMap = new Map(columns.map((c) => [c.name, c]));
+
+      expect(columnMap.has('id')).toBe(true);
+      expect(columnMap.has('stack_id')).toBe(true);
+      expect(columnMap.has('checkpoint_id')).toBe(true);
+      expect(columnMap.has('position')).toBe(true);
+
+      // Check NOT NULL constraints
+      expect(columnMap.get('stack_id')?.notnull).toBe(1);
+      expect(columnMap.get('checkpoint_id')?.notnull).toBe(1);
+      expect(columnMap.get('position')?.notnull).toBe(1);
+    });
+
+    it('should create indexes for checkpoints table', () => {
+      runDataplaneMigrations(db);
+
+      const indexes = db
+        .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='checkpoints'")
+        .all() as Array<{ name: string }>;
+      const indexNames = indexes.map((i) => i.name);
+
+      expect(indexNames).toContain('idx_checkpoints_stream');
+      expect(indexNames).toContain('idx_checkpoints_change_id');
+    });
+
+    it('should create indexes for diff_stacks table', () => {
+      runDataplaneMigrations(db);
+
+      const indexes = db
+        .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='diff_stacks'")
+        .all() as Array<{ name: string }>;
+      const indexNames = indexes.map((i) => i.name);
+
+      expect(indexNames).toContain('idx_diff_stacks_status');
+      expect(indexNames).toContain('idx_diff_stacks_queue');
+    });
+
+    it('should create indexes for diff_stack_entries table', () => {
+      runDataplaneMigrations(db);
+
+      const indexes = db
+        .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='diff_stack_entries'")
+        .all() as Array<{ name: string }>;
+      const indexNames = indexes.map((i) => i.name);
+
+      expect(indexNames).toContain('idx_stack_entries_stack_id');
+      expect(indexNames).toContain('idx_stack_entries_checkpoint_id');
+    });
+
+    it('should be idempotent when tables already exist', () => {
+      // Create tables manually first
+      db.exec(`
+        CREATE TABLE checkpoints (
+          id TEXT PRIMARY KEY,
+          stream_id TEXT NOT NULL,
+          commit_sha TEXT NOT NULL,
+          parent_commit TEXT,
+          original_commit TEXT,
+          change_id TEXT,
+          message TEXT,
+          created_at INTEGER NOT NULL,
+          created_by TEXT,
+          UNIQUE(stream_id, commit_sha)
+        );
+        CREATE TABLE diff_stacks (
+          id TEXT PRIMARY KEY,
+          name TEXT,
+          description TEXT,
+          target_branch TEXT NOT NULL DEFAULT 'main',
+          review_status TEXT NOT NULL DEFAULT 'pending',
+          reviewed_by TEXT,
+          reviewed_at INTEGER,
+          review_notes TEXT,
+          queue_position INTEGER,
+          created_at INTEGER NOT NULL,
+          created_by TEXT
+        );
+        CREATE TABLE diff_stack_entries (
+          id TEXT PRIMARY KEY,
+          stack_id TEXT NOT NULL,
+          checkpoint_id TEXT NOT NULL,
+          position INTEGER NOT NULL,
+          UNIQUE(stack_id, checkpoint_id)
+        );
+      `);
+
+      // Migration should be idempotent - should not throw
+      expect(() => runDataplaneMigrations(db)).not.toThrow();
+    });
+
+    it('should enforce unique constraint on checkpoints (stream_id, commit_sha)', () => {
+      runDataplaneMigrations(db);
+
+      // Insert a stream first
+      db.exec(`
+        INSERT INTO streams (id, name, agent_id, base_commit, created_at, updated_at)
+        VALUES ('stream-1', 'test', 'agent-1', 'abc123', ${Date.now()}, ${Date.now()})
+      `);
+
+      // Insert first checkpoint
+      db.exec(`
+        INSERT INTO checkpoints (id, stream_id, commit_sha, created_at)
+        VALUES ('cp-1', 'stream-1', 'commit-abc', ${Date.now()})
+      `);
+
+      // Try to insert duplicate - should fail
+      expect(() => {
+        db.exec(`
+          INSERT INTO checkpoints (id, stream_id, commit_sha, created_at)
+          VALUES ('cp-2', 'stream-1', 'commit-abc', ${Date.now()})
+        `);
+      }).toThrow();
+    });
+
+    it('should enforce unique constraint on diff_stack_entries (stack_id, checkpoint_id)', () => {
+      runDataplaneMigrations(db);
+
+      // Insert prerequisite data
+      db.exec(`
+        INSERT INTO streams (id, name, agent_id, base_commit, created_at, updated_at)
+        VALUES ('stream-1', 'test', 'agent-1', 'abc123', ${Date.now()}, ${Date.now()})
+      `);
+      db.exec(`
+        INSERT INTO checkpoints (id, stream_id, commit_sha, created_at)
+        VALUES ('cp-1', 'stream-1', 'commit-abc', ${Date.now()})
+      `);
+      db.exec(`
+        INSERT INTO diff_stacks (id, target_branch, review_status, created_at)
+        VALUES ('ds-1', 'main', 'pending', ${Date.now()})
+      `);
+
+      // Insert first entry
+      db.exec(`
+        INSERT INTO diff_stack_entries (id, stack_id, checkpoint_id, position)
+        VALUES ('entry-1', 'ds-1', 'cp-1', 0)
+      `);
+
+      // Try to insert duplicate - should fail
+      expect(() => {
+        db.exec(`
+          INSERT INTO diff_stack_entries (id, stack_id, checkpoint_id, position)
+          VALUES ('entry-2', 'ds-1', 'cp-1', 1)
+        `);
+      }).toThrow();
+    });
+
+    it('should rollback and remove all three tables', () => {
+      runDataplaneMigrations(db);
+
+      // Verify tables exist
+      let tables = db
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('checkpoints', 'diff_stacks', 'diff_stack_entries')")
+        .all() as Array<{ name: string }>;
+      expect(tables.length).toBe(3);
+
+      // Rollback migration 3
+      rollbackDataplaneMigration(db);
+
+      // Verify tables are dropped
+      tables = db
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('checkpoints', 'diff_stacks', 'diff_stack_entries')")
+        .all() as Array<{ name: string }>;
+      expect(tables.length).toBe(0);
     });
   });
 });

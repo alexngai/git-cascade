@@ -5,7 +5,7 @@
  * Migrations are tracked separately with prefix support.
  */
 
-import type Database from 'better-sqlite3';
+import type Database from "better-sqlite3";
 
 export interface DataplaneMigration {
   version: number;
@@ -23,11 +23,15 @@ export interface DataplaneMigration {
 const MIGRATIONS: DataplaneMigration[] = [
   {
     version: 1,
-    name: 'add-branch-point-commit',
+    name: "add-branch-point-commit",
     up: (db: Database.Database, prefix: string) => {
       // Check if branch_point_commit column exists
-      const columns = db.pragma(`table_info(${prefix}streams)`) as Array<{ name: string }>;
-      const hasBranchPointCommit = columns.some((col) => col.name === 'branch_point_commit');
+      const columns = db.pragma(`table_info(${prefix}streams)`) as Array<{
+        name: string;
+      }>;
+      const hasBranchPointCommit = columns.some(
+        (col) => col.name === "branch_point_commit"
+      );
 
       if (hasBranchPointCommit) {
         // Already migrated
@@ -47,9 +51,13 @@ const MIGRATIONS: DataplaneMigration[] = [
       }
 
       // Add branch_point_commit column for DAG tracking
-      db.exec(`ALTER TABLE ${prefix}streams ADD COLUMN branch_point_commit TEXT`);
+      db.exec(
+        `ALTER TABLE ${prefix}streams ADD COLUMN branch_point_commit TEXT`
+      );
 
-      console.log(`  ✓ Added branch_point_commit column to ${prefix}streams table`);
+      console.log(
+        `  ✓ Added branch_point_commit column to ${prefix}streams table`
+      );
     },
     down: (_db: Database.Database, _prefix: string) => {
       // SQLite doesn't support DROP COLUMN directly in older versions
@@ -60,7 +68,7 @@ const MIGRATIONS: DataplaneMigration[] = [
   },
   {
     version: 2,
-    name: 'add-stream-merges-table',
+    name: "add-stream-merges-table",
     up: (db: Database.Database, prefix: string) => {
       // Check if stream_merges table already exists
       const tables = db
@@ -95,11 +103,127 @@ const MIGRATIONS: DataplaneMigration[] = [
         CREATE INDEX IF NOT EXISTS ${prefix}idx_stream_merges_target ON ${prefix}stream_merges(target_stream_id);
       `);
 
-      console.log(`  ✓ Created ${prefix}stream_merges table for DAG merge tracking`);
+      console.log(
+        `  ✓ Created ${prefix}stream_merges table for DAG merge tracking`
+      );
     },
     down: (db: Database.Database, prefix: string) => {
       db.exec(`DROP TABLE IF EXISTS ${prefix}stream_merges;`);
       console.log(`  ✓ Dropped ${prefix}stream_merges table`);
+    },
+  },
+  {
+    version: 3,
+    name: "add-checkpoints-and-diff-stacks",
+    up: (db: Database.Database, prefix: string) => {
+      // Check if checkpoints table already exists
+      const checkpointsTables = db
+        .prepare(
+          `SELECT name FROM sqlite_master WHERE type='table' AND name='${prefix}checkpoints'`
+        )
+        .all() as Array<{ name: string }>;
+
+      if (checkpointsTables.length === 0) {
+        // Create checkpoints table - raw commit snapshots with minimal state
+        db.exec(`
+          CREATE TABLE ${prefix}checkpoints (
+            id TEXT PRIMARY KEY,
+            stream_id TEXT NOT NULL,
+            commit_sha TEXT NOT NULL,
+            parent_commit TEXT,
+            original_commit TEXT,
+            change_id TEXT,
+            message TEXT,
+            created_at INTEGER NOT NULL,
+            created_by TEXT,
+            FOREIGN KEY (stream_id) REFERENCES ${prefix}streams(id),
+            UNIQUE(stream_id, commit_sha)
+          );
+        `);
+
+        // Create indexes for checkpoints
+        db.exec(`
+          CREATE INDEX IF NOT EXISTS ${prefix}idx_checkpoints_stream ON ${prefix}checkpoints(stream_id);
+          CREATE INDEX IF NOT EXISTS ${prefix}idx_checkpoints_change_id ON ${prefix}checkpoints(change_id);
+        `);
+
+        console.log(`  ✓ Created ${prefix}checkpoints table`);
+      }
+
+      // Check if diff_stacks table already exists
+      const diffStacksTables = db
+        .prepare(
+          `SELECT name FROM sqlite_master WHERE type='table' AND name='${prefix}diff_stacks'`
+        )
+        .all() as Array<{ name: string }>;
+
+      if (diffStacksTables.length === 0) {
+        // Create diff_stacks table - reviewable/mergeable units
+        db.exec(`
+          CREATE TABLE ${prefix}diff_stacks (
+            id TEXT PRIMARY KEY,
+            name TEXT,
+            description TEXT,
+            target_branch TEXT NOT NULL DEFAULT 'main',
+            review_status TEXT NOT NULL DEFAULT 'pending',
+            reviewed_by TEXT,
+            reviewed_at INTEGER,
+            review_notes TEXT,
+            queue_position INTEGER,
+            created_at INTEGER NOT NULL,
+            created_by TEXT
+          );
+        `);
+
+        // Create indexes for diff_stacks
+        db.exec(`
+          CREATE INDEX IF NOT EXISTS ${prefix}idx_diff_stacks_status ON ${prefix}diff_stacks(review_status);
+          CREATE INDEX IF NOT EXISTS ${prefix}idx_diff_stacks_queue ON ${prefix}diff_stacks(target_branch, queue_position)
+            WHERE queue_position IS NOT NULL;
+        `);
+
+        console.log(`  ✓ Created ${prefix}diff_stacks table`);
+      }
+
+      // Check if diff_stack_entries table already exists
+      const entriesTables = db
+        .prepare(
+          `SELECT name FROM sqlite_master WHERE type='table' AND name='${prefix}diff_stack_entries'`
+        )
+        .all() as Array<{ name: string }>;
+
+      if (entriesTables.length === 0) {
+        // Create diff_stack_entries table - checkpoint grouping (many-to-many)
+        db.exec(`
+          CREATE TABLE ${prefix}diff_stack_entries (
+            id TEXT PRIMARY KEY,
+            stack_id TEXT NOT NULL,
+            checkpoint_id TEXT NOT NULL,
+            position INTEGER NOT NULL,
+            FOREIGN KEY (stack_id) REFERENCES ${prefix}diff_stacks(id) ON DELETE CASCADE,
+            FOREIGN KEY (checkpoint_id) REFERENCES ${prefix}checkpoints(id),
+            UNIQUE(stack_id, checkpoint_id)
+          );
+        `);
+
+        // Create indexes for diff_stack_entries
+        db.exec(`
+          CREATE INDEX IF NOT EXISTS ${prefix}idx_stack_entries_stack_id ON ${prefix}diff_stack_entries(stack_id);
+          CREATE INDEX IF NOT EXISTS ${prefix}idx_stack_entries_checkpoint_id ON ${prefix}diff_stack_entries(checkpoint_id);
+        `);
+
+        console.log(`  ✓ Created ${prefix}diff_stack_entries table`);
+      }
+
+      console.log(`  ✓ Completed checkpoint and diff stack schema migration`);
+    },
+    down: (db: Database.Database, prefix: string) => {
+      db.exec(`DROP TABLE IF EXISTS ${prefix}diff_stack_entries;`);
+      db.exec(`DROP TABLE IF EXISTS ${prefix}diff_stacks;`);
+      db.exec(`DROP TABLE IF EXISTS ${prefix}checkpoints;`);
+      console.log(
+        `  ✓ Dropped checkpoints, diff_stacks, and diff_stack_entries tables`
+      );
     },
   },
 ];
@@ -116,7 +240,7 @@ function getMigrationTableName(prefix: string): string {
  */
 export function getCurrentDataplaneMigrationVersion(
   db: Database.Database,
-  prefix: string = ''
+  prefix: string = ""
 ): number {
   const tableName = getMigrationTableName(prefix);
 
@@ -140,7 +264,7 @@ export function getCurrentDataplaneMigrationVersion(
 export function recordDataplaneMigration(
   db: Database.Database,
   migration: DataplaneMigration,
-  prefix: string = ''
+  prefix: string = ""
 ): void {
   const tableName = getMigrationTableName(prefix);
   const stmt = db.prepare(`
@@ -159,7 +283,7 @@ export function recordDataplaneMigration(
  */
 export function runDataplaneMigrations(
   db: Database.Database,
-  prefix: string = ''
+  prefix: string = ""
 ): number {
   const currentVersion = getCurrentDataplaneMigrationVersion(db, prefix);
 
@@ -171,16 +295,25 @@ export function runDataplaneMigrations(
     return 0;
   }
 
-  console.log(`Running ${pendingMigrations.length} pending dataplane migration(s)...`);
+  console.log(
+    `Running ${pendingMigrations.length} pending dataplane migration(s)...`
+  );
 
   for (const migration of pendingMigrations) {
-    console.log(`  Applying dataplane migration ${migration.version}: ${migration.name}`);
+    console.log(
+      `  Applying dataplane migration ${migration.version}: ${migration.name}`
+    );
     try {
       migration.up(db, prefix);
       recordDataplaneMigration(db, migration, prefix);
-      console.log(`  ✓ Dataplane migration ${migration.version} applied successfully`);
+      console.log(
+        `  ✓ Dataplane migration ${migration.version} applied successfully`
+      );
     } catch (error) {
-      console.error(`  ✗ Dataplane migration ${migration.version} failed:`, error);
+      console.error(
+        `  ✗ Dataplane migration ${migration.version} failed:`,
+        error
+      );
       throw error;
     }
   }
@@ -197,12 +330,12 @@ export function runDataplaneMigrations(
  */
 export function rollbackDataplaneMigration(
   db: Database.Database,
-  prefix: string = ''
+  prefix: string = ""
 ): boolean {
   const currentVersion = getCurrentDataplaneMigrationVersion(db, prefix);
 
   if (currentVersion === 0) {
-    console.log('No migrations to rollback');
+    console.log("No migrations to rollback");
     return false;
   }
 
@@ -217,18 +350,27 @@ export function rollbackDataplaneMigration(
     return false;
   }
 
-  console.log(`Rolling back dataplane migration ${migration.version}: ${migration.name}`);
+  console.log(
+    `Rolling back dataplane migration ${migration.version}: ${migration.name}`
+  );
 
   try {
     migration.down(db, prefix);
 
     const tableName = getMigrationTableName(prefix);
-    db.prepare(`DELETE FROM ${tableName} WHERE version = ?`).run(migration.version);
+    db.prepare(`DELETE FROM ${tableName} WHERE version = ?`).run(
+      migration.version
+    );
 
-    console.log(`  ✓ Dataplane migration ${migration.version} rolled back successfully`);
+    console.log(
+      `  ✓ Dataplane migration ${migration.version} rolled back successfully`
+    );
     return true;
   } catch (error) {
-    console.error(`  ✗ Rollback of dataplane migration ${migration.version} failed:`, error);
+    console.error(
+      `  ✗ Rollback of dataplane migration ${migration.version} failed:`,
+      error
+    );
     throw error;
   }
 }
@@ -244,5 +386,7 @@ export function getDataplaneMigrations(): readonly DataplaneMigration[] {
  * Get the latest migration version available.
  */
 export function getLatestDataplaneMigrationVersion(): number {
-  return MIGRATIONS.length > 0 ? Math.max(...MIGRATIONS.map((m) => m.version)) : 0;
+  return MIGRATIONS.length > 0
+    ? Math.max(...MIGRATIONS.map((m) => m.version))
+    : 0;
 }

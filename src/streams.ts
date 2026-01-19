@@ -27,6 +27,7 @@ import * as cascade from './cascade.js';
 import { StreamNotFoundError, BranchNotFoundError, StreamConflictedError, ConflictResolutionError } from './errors.js';
 import * as conflicts from './conflicts.js';
 import * as gc from './gc.js';
+import * as checkpoints from './checkpoints.js';
 
 /** Default timeout for conflict handler (5 minutes) */
 const DEFAULT_CONFLICT_TIMEOUT = 300000;
@@ -296,26 +297,45 @@ export function updateStreamStatus(
 
 /**
  * Abandon a stream.
+ *
+ * @param db Database instance
+ * @param streamId Stream to abandon
+ * @param options Optional settings
+ * @param options.reason Reason for abandonment
+ * @param options.cascade If true, also abandon all child streams (default: false)
  */
 export function abandonStream(
   db: Database.Database,
   streamId: string,
-  reason?: string
+  options: { reason?: string; cascade?: boolean } = {}
 ): void {
+  const { reason, cascade = false } = options;
   const stream = getStreamOrThrow(db, streamId);
   const now = Date.now();
+  const t = getTables(db);
 
+  // Mark this stream as abandoned
   const metadata = {
     ...stream.metadata,
     abandonedAt: now,
     abandonReason: reason,
   };
 
-  const t = getTables(db);
   db.prepare(`
     UPDATE ${t.streams} SET status = 'abandoned', updated_at = ?, metadata = ?
     WHERE id = ?
   `).run(now, JSON.stringify(metadata), streamId);
+
+  // Cascade to child streams if requested
+  if (cascade) {
+    const childStreams = db
+      .prepare(`SELECT id FROM ${t.streams} WHERE parent_stream = ?`)
+      .all(streamId) as Array<{ id: string }>;
+
+    for (const child of childStreams) {
+      abandonStream(db, child.id, { reason: `Parent stream ${streamId} abandoned`, cascade: true });
+    }
+  }
 }
 
 /**
@@ -408,6 +428,57 @@ export function forkStream(
 
   // Add fork dependency for cascade rebase
   deps.addForkDependency(db, newStreamId, parent.id);
+
+  return newStreamId;
+}
+
+/**
+ * Options for forking from a checkpoint.
+ */
+export interface ForkFromCheckpointOptions {
+  /** The checkpoint to fork from */
+  checkpointId: string;
+  /** Name for the new stream (defaults to "fork-of-<checkpoint-id>") */
+  name?: string;
+  /** Agent creating the fork */
+  agentId: string;
+}
+
+/**
+ * Fork a new stream from a checkpoint.
+ *
+ * Creates a new stream that starts from the checkpoint's commit.
+ * The new stream's parent is the checkpoint's stream.
+ *
+ * @param db Database instance
+ * @param repoPath Repository path
+ * @param options Fork options
+ * @returns The new stream ID
+ * @throws Error if checkpoint not found
+ */
+export function forkFromCheckpoint(
+  db: Database.Database,
+  repoPath: string,
+  options: ForkFromCheckpointOptions
+): string {
+  const checkpoint = checkpoints.getCheckpoint(db, options.checkpointId);
+  if (!checkpoint) {
+    throw new Error(`Checkpoint not found: ${options.checkpointId}`);
+  }
+
+  const parentStream = getStreamOrThrow(db, checkpoint.streamId);
+  const name = options.name ?? `fork-of-${checkpoint.id}`;
+
+  // Create new stream starting from checkpoint's commit
+  const newStreamId = createStream(db, repoPath, {
+    name,
+    agentId: options.agentId,
+    base: checkpoint.commitSha,
+    parentStream: parentStream.id,
+  });
+
+  // Add fork dependency for cascade rebase
+  deps.addForkDependency(db, newStreamId, parentStream.id);
 
   return newStreamId;
 }
