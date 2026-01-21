@@ -627,8 +627,9 @@ describe('Dataplane Migrations', () => {
         .all() as Array<{ name: string }>;
       expect(tables.length).toBe(3);
 
-      // Rollback migration 3
-      rollbackDataplaneMigration(db);
+      // Rollback migration 4 (worker_tasks) first, then migration 3
+      rollbackDataplaneMigration(db); // Rolls back migration 4
+      rollbackDataplaneMigration(db); // Rolls back migration 3
 
       // Verify tables are dropped
       tables = db

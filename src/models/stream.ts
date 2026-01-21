@@ -4,6 +4,8 @@
  * A Stream is a logical unit of work that maps 1:1 to a git branch.
  */
 
+import type { WorkerTask } from './task.js';
+
 export type StreamStatus = 'active' | 'paused' | 'merged' | 'abandoned' | 'conflicted';
 
 export interface Stream {
@@ -230,15 +232,15 @@ export interface RebaseResult {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Node in the stream graph tree.
+ * Node in the stream hierarchy tree.
  */
 export interface StreamNode {
   /** The stream at this node */
   stream: Stream;
   /** Child streams (forked from this stream) */
   children: StreamNode[];
-  /** IDs of streams this stream depends on */
-  dependencies: string[];
+  /** Active worker tasks on this stream (open + in_progress) */
+  tasks: WorkerTask[];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

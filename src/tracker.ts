@@ -19,6 +19,8 @@ import * as recovery from './recovery.js';
 import * as gc from './gc.js';
 import * as reconcile from './reconcile.js';
 import * as mergeQueue from './merge-queue.js';
+import * as workerTasks from './worker-tasks.js';
+import * as diffStacks from './diff-stacks.js';
 import type {
   Stream,
   StreamStatus,
@@ -41,12 +43,28 @@ import type {
   Change,
   ChangeStatus,
   CreateChangeOptions,
+  WorkerTask,
+  CreateTaskOptions,
+  StartTaskOptions,
+  CompleteTaskOptions,
+  ListTasksOptions,
+  CleanupWorkerBranchesOptions,
+  StartTaskResult,
+  CompleteTaskResult,
+  CleanupResult,
+  Checkpoint,
+  DiffStackWithCheckpoints,
 } from './models/index.js';
 import type {
   RollbackToOperationOptions,
   RollbackNOptions,
   RollbackToForkPointOptions,
 } from './rollback.js';
+import type {
+  CreateCheckpointsFromStreamOptions,
+  CreateStackFromStreamOptions,
+  CherryPickStackResult,
+} from './diff-stacks.js';
 import { StreamConflictedError } from './errors.js';
 
 export interface TrackerOptions {
@@ -356,6 +374,19 @@ export class MultiAgentRepoTracker {
     return streams.findCommonAncestor(this.repoPath, streamIdA, streamIdB);
   }
 
+  /**
+   * Get stream hierarchy as a tree structure with active tasks.
+   *
+   * @param rootStreamId - If provided, returns tree from this stream
+   * @returns Single StreamNode if rootStreamId provided, otherwise array of root trees
+   */
+  getStreamHierarchy(rootStreamId?: string): StreamNode | StreamNode[] {
+    return streams.getStreamHierarchy(this.db, rootStreamId);
+  }
+
+  /**
+   * @deprecated Use getStreamHierarchy instead
+   */
   getStreamGraph(rootStreamId?: string): StreamNode | StreamNode[] {
     return streams.getStreamGraph(this.db, rootStreamId);
   }
@@ -591,5 +622,136 @@ export class MultiAgentRepoTracker {
    */
   getMergeQueuePosition(streamId: string, targetBranch?: string): number | null {
     return mergeQueue.getQueuePosition(this.db, streamId, targetBranch);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Worker Tasks
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Create a worker task under a stream.
+   *
+   * @param options - Task creation options
+   * @returns Task ID
+   */
+  createTask(options: CreateTaskOptions): string {
+    return workerTasks.createTask(this.db, options);
+  }
+
+  /**
+   * Get a worker task by ID.
+   */
+  getTask(taskId: string): WorkerTask | null {
+    return workerTasks.getTask(this.db, taskId);
+  }
+
+  /**
+   * List tasks for a stream with optional filters.
+   */
+  listTasks(streamId: string, options?: ListTasksOptions): WorkerTask[] {
+    return workerTasks.listTasks(this.db, streamId, options);
+  }
+
+  /**
+   * Start a task - assigns an agent and creates the worker branch.
+   *
+   * @param options - Start task options including taskId, agentId, and worktree
+   * @returns Branch name and start commit
+   */
+  startTask(options: StartTaskOptions): StartTaskResult {
+    return workerTasks.startTask(this.db, this.repoPath, options);
+  }
+
+  /**
+   * Complete a task - merges the worker branch to the stream.
+   *
+   * Uses --no-ff to always create a merge commit, preserving full history.
+   *
+   * @param options - Complete task options
+   * @returns Merge commit hash
+   * @throws TaskConflictError if merge conflicts occur
+   */
+  completeTask(options: CompleteTaskOptions): CompleteTaskResult {
+    return workerTasks.completeTask(this.db, this.repoPath, options);
+  }
+
+  /**
+   * Abandon a task - marks it as abandoned and optionally deletes the branch.
+   *
+   * @param taskId - Task ID
+   * @param options - Options (deleteBranch: whether to delete the git branch)
+   */
+  abandonTask(taskId: string, options?: { deleteBranch?: boolean }): void {
+    workerTasks.abandonTask(this.db, this.repoPath, taskId, options);
+  }
+
+  /**
+   * Release a task back to 'open' status.
+   *
+   * Used for recovery from conflicts or stuck tasks.
+   */
+  releaseTask(taskId: string): void {
+    workerTasks.releaseTask(this.db, taskId);
+  }
+
+  /**
+   * Clean up old worker branches.
+   *
+   * Deletes branches for completed/abandoned tasks older than threshold,
+   * and optionally orphaned branches with no task record.
+   *
+   * @param options - Cleanup options
+   * @returns List of deleted branches and any errors
+   */
+  cleanupWorkerBranches(options?: CleanupWorkerBranchesOptions): CleanupResult {
+    return workerTasks.cleanupWorkerBranches(this.db, this.repoPath, options);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Stream-based Diff Stacks
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Create checkpoints from stream commits.
+   *
+   * Gets commits from the stream's baseCommit to current HEAD and creates
+   * a checkpoint for each. Reuses existing checkpoints if already tracked.
+   *
+   * @param streamId - Stream to create checkpoints from
+   * @param options - Optional commit range and creator
+   * @returns Array of checkpoints in commit order
+   */
+  createCheckpointsFromStream(
+    streamId: string,
+    options?: CreateCheckpointsFromStreamOptions
+  ): Checkpoint[] {
+    return diffStacks.createCheckpointsFromStream(this.db, this.repoPath, streamId, options);
+  }
+
+  /**
+   * Create a diff stack from stream commits.
+   *
+   * Creates checkpoints for commits in the specified range, then groups them
+   * into a diff stack for review.
+   *
+   * @param options - Stack creation options including streamId
+   * @returns DiffStackWithCheckpoints containing the stack and its checkpoints
+   */
+  createStackFromStream(options: CreateStackFromStreamOptions): DiffStackWithCheckpoints {
+    return diffStacks.createStackFromStream(this.db, this.repoPath, options);
+  }
+
+  /**
+   * Cherry-pick an approved stack's checkpoints to the target branch.
+   *
+   * Verifies the stack is approved, checks out the target branch, and
+   * cherry-picks each checkpoint in order. Marks stack as merged on success.
+   *
+   * @param stackId - Stack to cherry-pick
+   * @param worktree - Path to worktree for git operations
+   * @returns Result including success status, cherry-picked commits, and new commits
+   */
+  cherryPickStackToTarget(stackId: string, worktree: string): CherryPickStackResult {
+    return diffStacks.cherryPickStackToTarget(this.db, this.repoPath, stackId, worktree);
   }
 }

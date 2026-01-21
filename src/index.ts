@@ -56,5 +56,8 @@ export * as checkpoints from './checkpoints.js';
 // Diff Stacks (low-level API)
 export * as diffStacks from './diff-stacks.js';
 
+// Worker Tasks (low-level API)
+export * as workerTasks from './worker-tasks.js';
+
 // Errors
 export * from './errors.js';

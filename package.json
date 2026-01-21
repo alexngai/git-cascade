@@ -20,6 +20,8 @@
     "dev": "tsx watch src/index.ts",
     "test": "vitest",
     "test:run": "vitest run",
+    "test:all": "RUN_SLOW_TESTS=true vitest run",
+    "test:e2e": "RUN_SLOW_TESTS=true vitest run tests/e2e",
     "lint": "eslint src --ext .ts",
     "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\"",
     "typecheck": "tsc --noEmit",
@@ -56,7 +58,7 @@
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.11",
     "@types/node": "^22.10.2",
-    "@vitest/coverage-v8": "^4.0.16",
+    "@vitest/coverage-v8": "^2.1.8",
     "prettier": "^3.4.2",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",

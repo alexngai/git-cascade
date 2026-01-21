@@ -15,6 +15,7 @@ import * as snapshots from './snapshots.js';
 import * as conflicts from './conflicts.js';
 import * as gc from './gc.js';
 import * as streams from './streams.js';
+import * as workerTasks from './worker-tasks.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -345,6 +346,8 @@ export interface StartupRecoveryResult {
   recoveredConflicts: number;
   /** Number of streams cleaned from conflicted status */
   cleanedStreams: number;
+  /** Number of stale worker tasks released */
+  releasedTasks: number;
   /** Log of actions taken */
   log: string[];
 }
@@ -356,6 +359,7 @@ export interface StartupRecoveryResult {
  * 1. Recover incomplete operations (clear checkpoints without git reset since we don't have worktree info)
  * 2. Release stale locks (older than 5 minutes)
  * 3. Recover orphaned conflicts (in_progress without active rebase)
+ * 4. Release stale worker tasks (in_progress for longer than 1 hour)
  *
  * Each action is logged for transparency.
  *
@@ -373,6 +377,7 @@ export function startupRecovery(
   let releasedLocks = 0;
   let recoveredConflicts = 0;
   let cleanedStreams = 0;
+  let releasedTasks = 0;
 
   // ─────────────────────────────────────────────────────────────────────────
   // Step 1: Recover incomplete operations
@@ -419,11 +424,23 @@ export function startupRecovery(
     log.push(`Cleaned conflicted status from stream: ${streamId}`);
   }
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // Step 4: Recover stale worker tasks
+  // ─────────────────────────────────────────────────────────────────────────
+  // Release tasks that have been in_progress for longer than 1 hour
+  const staleTasksResult = workerTasks.recoverStaleTasks(db);
+
+  releasedTasks = staleTasksResult.released.length;
+  for (const taskId of staleTasksResult.released) {
+    log.push(`Released stale worker task: ${taskId}`);
+  }
+
   return {
     recoveredOperations,
     releasedLocks,
     recoveredConflicts,
     cleanedStreams,
+    releasedTasks,
     log,
   };
 }

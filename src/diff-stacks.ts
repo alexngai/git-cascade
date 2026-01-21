@@ -20,6 +20,62 @@ import type {
   SetStackReviewStatusOptions,
   ListDiffStacksOptions,
 } from './models/checkpoint.js';
+import * as git from './git/index.js';
+import * as checkpoints from './checkpoints.js';
+import * as streams from './streams.js';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Stream-based Options Types
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Options for creating checkpoints from stream commits.
+ */
+export interface CreateCheckpointsFromStreamOptions {
+  /** Start commit (exclusive). Defaults to stream's baseCommit. */
+  from?: string;
+  /** End commit (inclusive). Defaults to stream's current HEAD. */
+  to?: string;
+  /** Creator identifier for the checkpoints. */
+  createdBy?: string;
+}
+
+/**
+ * Options for creating a diff stack from stream commits.
+ */
+export interface CreateStackFromStreamOptions {
+  /** Stream ID to create stack from. */
+  streamId: string;
+  /** Optional human-readable name for the stack. */
+  name?: string;
+  /** Optional description. */
+  description?: string;
+  /** Target branch for merge (default: 'main'). */
+  targetBranch?: string;
+  /** Commit range (defaults to stream's baseCommit to HEAD). */
+  commitRange?: {
+    from: string;
+    to: string;
+  };
+  /** Creator identifier. */
+  createdBy?: string;
+}
+
+/**
+ * Result of cherry-picking a stack to target.
+ */
+export interface CherryPickStackResult {
+  /** Whether the operation succeeded. */
+  success: boolean;
+  /** Original commits that were cherry-picked. */
+  cherryPickedCommits: string[];
+  /** New commits created on target branch. */
+  newCommits: string[];
+  /** Error message if operation failed. */
+  error?: string;
+  /** Conflicting files if operation failed due to conflicts. */
+  conflicts?: string[];
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Row Conversion
@@ -726,4 +782,244 @@ export function deleteStacksByStatus(
     .prepare(`DELETE FROM ${t.diff_stacks} WHERE review_status = ?`)
     .run(status);
   return result.changes;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Stream-based Operations
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Create checkpoints from stream commits.
+ *
+ * Gets commits from the stream's baseCommit (or specified `from`) to current HEAD
+ * (or specified `to`), and creates a checkpoint for each commit. Reuses existing
+ * checkpoints if the (streamId, commitSha) pair already exists.
+ *
+ * @param db Database instance
+ * @param repoPath Path to the git repository
+ * @param streamId Stream to create checkpoints from
+ * @param options Optional commit range and creator
+ * @returns Array of checkpoints in commit order
+ * @throws Error if stream not found
+ */
+export function createCheckpointsFromStream(
+  db: Database.Database,
+  repoPath: string,
+  streamId: string,
+  options: CreateCheckpointsFromStreamOptions = {}
+): Checkpoint[] {
+  const gitOpts = { cwd: repoPath };
+
+  // Get stream to determine base commit
+  const stream = streams.getStream(db, streamId);
+  if (!stream) {
+    throw new Error(`Stream not found: ${streamId}`);
+  }
+
+  // Determine branch name for this stream
+  const branchName = stream.existingBranch ?? `stream/${streamId}`;
+
+  // Determine commit range
+  const fromCommit = options.from ?? stream.baseCommit;
+  const toCommit = options.to ?? git.resolveRef(branchName, gitOpts);
+
+  // Get commits in range (from is exclusive, to is inclusive)
+  const commits = git.getCommitRange(fromCommit, toCommit, gitOpts);
+
+  if (commits.length === 0) {
+    return [];
+  }
+
+  const result: Checkpoint[] = [];
+
+  for (const commitSha of commits) {
+    // Check if checkpoint already exists for this stream/commit pair
+    const existing = checkpoints.getCheckpointByCommit(db, streamId, commitSha);
+    if (existing) {
+      result.push(existing);
+      continue;
+    }
+
+    // Get commit details
+    const message = git.getCommitMessage(commitSha, gitOpts);
+    const changeId = git.getCommitChangeId(commitSha, gitOpts);
+
+    // Get parent commit
+    let parentCommit: string | null = null;
+    try {
+      parentCommit = git.git(['rev-parse', `${commitSha}^`], gitOpts);
+    } catch {
+      // First commit has no parent
+    }
+
+    // Create checkpoint
+    const checkpoint = checkpoints.createCheckpoint(db, {
+      streamId,
+      commitSha,
+      parentCommit: parentCommit ?? undefined,
+      originalCommit: commitSha,
+      changeId: changeId ?? undefined,
+      message,
+      createdBy: options.createdBy,
+    });
+
+    result.push(checkpoint);
+  }
+
+  return result;
+}
+
+/**
+ * Create a diff stack from stream commits.
+ *
+ * Creates checkpoints for commits in the specified range (or all commits since
+ * stream's baseCommit), then groups them into a diff stack for review.
+ *
+ * @param db Database instance
+ * @param repoPath Path to the git repository
+ * @param options Stack creation options including streamId and optional range
+ * @returns DiffStackWithCheckpoints containing the stack and its checkpoints
+ * @throws Error if stream not found
+ */
+export function createStackFromStream(
+  db: Database.Database,
+  repoPath: string,
+  options: CreateStackFromStreamOptions
+): DiffStackWithCheckpoints {
+  // Create checkpoints from stream commits
+  const streamCheckpoints = createCheckpointsFromStream(db, repoPath, options.streamId, {
+    from: options.commitRange?.from,
+    to: options.commitRange?.to,
+    createdBy: options.createdBy,
+  });
+
+  // Create the diff stack with checkpoints
+  const stack = createDiffStack(db, {
+    name: options.name,
+    description: options.description,
+    targetBranch: options.targetBranch ?? 'main',
+    checkpointIds: streamCheckpoints.map((cp) => cp.id),
+    createdBy: options.createdBy,
+  });
+
+  // Return stack with checkpoints
+  return {
+    ...stack,
+    checkpoints: streamCheckpoints.map((cp, index) => ({
+      ...cp,
+      position: index,
+    })),
+  };
+}
+
+/**
+ * Cherry-pick an approved stack's checkpoints to the target branch.
+ *
+ * Verifies the stack is approved, checks out the target branch in the provided
+ * worktree, and cherry-picks each checkpoint's commit in order. If all succeed,
+ * marks the stack as merged.
+ *
+ * @param db Database instance
+ * @param repoPath Path to the git repository
+ * @param stackId Stack to cherry-pick
+ * @param worktree Path to worktree for git operations
+ * @returns Result including cherry-picked and new commits
+ * @throws Error if stack not found or not approved
+ */
+export function cherryPickStackToTarget(
+  db: Database.Database,
+  _repoPath: string,
+  stackId: string,
+  worktree: string
+): CherryPickStackResult {
+  const gitOpts = { cwd: worktree };
+
+  // Get stack with checkpoints
+  const stack = getDiffStackWithCheckpoints(db, stackId);
+  if (!stack) {
+    return {
+      success: false,
+      cherryPickedCommits: [],
+      newCommits: [],
+      error: `Stack not found: ${stackId}`,
+    };
+  }
+
+  // Verify stack is approved
+  if (stack.reviewStatus !== 'approved') {
+    return {
+      success: false,
+      cherryPickedCommits: [],
+      newCommits: [],
+      error: `Stack is not approved. Current status: ${stack.reviewStatus}`,
+    };
+  }
+
+  // Verify there are checkpoints to cherry-pick
+  if (stack.checkpoints.length === 0) {
+    // Empty stack - mark as merged and return success
+    setStackReviewStatus(db, {
+      stackId,
+      status: 'merged',
+    });
+    return {
+      success: true,
+      cherryPickedCommits: [],
+      newCommits: [],
+    };
+  }
+
+  // Checkout target branch
+  try {
+    git.checkout(stack.targetBranch, gitOpts);
+  } catch (err) {
+    return {
+      success: false,
+      cherryPickedCommits: [],
+      newCommits: [],
+      error: `Failed to checkout target branch '${stack.targetBranch}': ${err}`,
+    };
+  }
+
+  const cherryPickedCommits: string[] = [];
+  const newCommits: string[] = [];
+
+  // Cherry-pick each checkpoint in order
+  for (const checkpoint of stack.checkpoints) {
+    const result = git.cherryPickWithCommit(checkpoint.commitSha, gitOpts);
+
+    if (!result.success) {
+      // Abort cherry-pick and return error
+      try {
+        git.cherryPickAbort(gitOpts);
+      } catch {
+        // Ignore abort errors
+      }
+
+      return {
+        success: false,
+        cherryPickedCommits,
+        newCommits,
+        error: `Conflict while cherry-picking commit ${checkpoint.commitSha}`,
+        conflicts: result.conflicts,
+      };
+    }
+
+    cherryPickedCommits.push(checkpoint.commitSha);
+    if (result.newCommit) {
+      newCommits.push(result.newCommit);
+    }
+  }
+
+  // All cherry-picks succeeded - mark stack as merged
+  setStackReviewStatus(db, {
+    stackId,
+    status: 'merged',
+  });
+
+  return {
+    success: true,
+    cherryPickedCommits,
+    newCommits,
+  };
 }

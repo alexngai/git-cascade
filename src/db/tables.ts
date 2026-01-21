@@ -22,10 +22,11 @@ export interface TableNames {
   operation_checkpoints: string;
   merge_queue: string;
   stream_merges: string;
-  // New tables for unified checkpoint/diff stack system (s-366r)
   checkpoints: string;
   diff_stacks: string;
   diff_stack_entries: string;
+  worker_tasks: string;
+  task_merges: string;
 }
 
 /**
@@ -55,10 +56,11 @@ export function getTableNames(prefix: string = ""): TableNames {
     operation_checkpoints: `${prefix}operation_checkpoints`,
     merge_queue: `${prefix}merge_queue`,
     stream_merges: `${prefix}stream_merges`,
-    // New tables for unified checkpoint/diff stack system
     checkpoints: `${prefix}checkpoints`,
     diff_stacks: `${prefix}diff_stacks`,
     diff_stack_entries: `${prefix}diff_stack_entries`,
+    worker_tasks: `${prefix}worker_tasks`,
+    task_merges: `${prefix}task_merges`,
   };
 }
 
