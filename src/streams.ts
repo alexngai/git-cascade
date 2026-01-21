@@ -28,6 +28,7 @@ import { StreamNotFoundError, BranchNotFoundError, StreamConflictedError, Confli
 import * as conflicts from './conflicts.js';
 import * as gc from './gc.js';
 import * as checkpoints from './checkpoints.js';
+import * as workerTasks from './worker-tasks.js';
 
 /** Default timeout for conflict handler (5 minutes) */
 const DEFAULT_CONFLICT_TIMEOUT = 300000;
@@ -855,7 +856,7 @@ export function rebaseOntoStream(
 ): RebaseResult {
   const { sourceStream, targetStream, worktree, agentId } = options;
   const onConflict = options.onConflict ?? 'abort';
-  const shouldCascade = options.cascade !== false; // Default true
+  const shouldCascade = options.cascade === true; // Default false (user-initiated sync)
 
   // Validate streams exist
   const source = getStreamOrThrow(db, sourceStream);
@@ -1385,22 +1386,27 @@ export function getRootStreams(db: Database.Database): Stream[] {
  */
 function buildStreamNode(db: Database.Database, stream: Stream): StreamNode {
   const children = getChildStreams(db, stream.id);
-  const dependencies = deps.getDependencies(db, stream.id);
+  // Get active tasks (open + in_progress) for this stream
+  const activeTasks = workerTasks.listTasks(db, stream.id).filter(
+    (task) => task.status === 'open' || task.status === 'in_progress'
+  );
 
   return {
     stream,
     children: children.map((child) => buildStreamNode(db, child)),
-    dependencies,
+    tasks: activeTasks,
   };
 }
 
 /**
- * Get stream graph as a tree structure.
+ * Get stream hierarchy as a tree structure.
+ *
+ * Returns a recursive tree of streams with their children and active worker tasks.
  *
  * @param rootStreamId - If provided, returns tree from this stream
  * @returns Single StreamNode if rootStreamId provided, otherwise array of root trees
  */
-export function getStreamGraph(
+export function getStreamHierarchy(
   db: Database.Database,
   rootStreamId?: string
 ): StreamNode | StreamNode[] {
@@ -1412,6 +1418,18 @@ export function getStreamGraph(
   // Return forest of all root streams
   const roots = getRootStreams(db);
   return roots.map((stream) => buildStreamNode(db, stream));
+}
+
+/**
+ * Get stream graph as a tree structure.
+ *
+ * @deprecated Use getStreamHierarchy instead
+ */
+export function getStreamGraph(
+  db: Database.Database,
+  rootStreamId?: string
+): StreamNode | StreamNode[] {
+  return getStreamHierarchy(db, rootStreamId);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { MultiAgentRepoTracker } from '../src/tracker.js';
 import { createTestRepo } from './setup.js';
 import * as git from '../src/git/index.js';
+import * as workerTasks from '../src/worker-tasks.js';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -307,16 +308,19 @@ describe('Cross-Stream Operations', () => {
       expect(grandchildNode.stream.id).toBe(grandchildId);
     });
 
-    it('should include dependencies in stream graph', () => {
+    it('should include active tasks in stream hierarchy', () => {
       const stream1 = tracker.createStream({ name: 'stream-1', agentId: 'agent-1' });
-      const stream2 = tracker.createStream({ name: 'stream-2', agentId: 'agent-1' });
 
-      tracker.addDependency(stream1, stream2);
+      // Create tasks for the stream
+      workerTasks.createTask(tracker.db, { title: 'Task 1', streamId: stream1 });
+      workerTasks.createTask(tracker.db, { title: 'Task 2', streamId: stream1 });
 
-      const graph = tracker.getStreamGraph(stream1);
-      const node = graph as { dependencies: string[] };
+      const graph = tracker.getStreamHierarchy(stream1);
+      const node = graph as { tasks: Array<{ title: string }> };
 
-      expect(node.dependencies).toContain(stream2);
+      expect(node.tasks).toHaveLength(2);
+      expect(node.tasks.map((t) => t.title)).toContain('Task 1');
+      expect(node.tasks.map((t) => t.title)).toContain('Task 2');
     });
   });
 });

@@ -193,12 +193,13 @@ describe('Cascade Rebase', () => {
       git.stageAll({ cwd: testRepo.path });
       git.commit('commit A2', { cwd: testRepo.path });
 
-      // Rebase B onto A (should trigger cascade to C)
+      // Rebase B onto A with cascade enabled (should trigger cascade to C)
       const result = tracker.rebaseOntoStream({
         sourceStream: streamB,
         targetStream: streamA,
         agentId: 'agent-1',
         worktree: testRepo.path,
+        cascade: true,
       });
 
       expect(result.success).toBe(true);

@@ -356,6 +356,19 @@ export class MultiAgentRepoTracker {
     return streams.findCommonAncestor(this.repoPath, streamIdA, streamIdB);
   }
 
+  /**
+   * Get stream hierarchy as a tree structure with active tasks.
+   *
+   * @param rootStreamId - If provided, returns tree from this stream
+   * @returns Single StreamNode if rootStreamId provided, otherwise array of root trees
+   */
+  getStreamHierarchy(rootStreamId?: string): StreamNode | StreamNode[] {
+    return streams.getStreamHierarchy(this.db, rootStreamId);
+  }
+
+  /**
+   * @deprecated Use getStreamHierarchy instead
+   */
   getStreamGraph(rootStreamId?: string): StreamNode | StreamNode[] {
     return streams.getStreamGraph(this.db, rootStreamId);
   }
