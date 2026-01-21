@@ -777,4 +777,276 @@ describe('Diff Stack Operations', () => {
       expect(remaining[0].name).toBe('Stack 3');
     });
   });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Stream-based Operations
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  describe('createCheckpointsFromStream', () => {
+    it('should create checkpoints from stream commits', () => {
+      git.checkout(`stream/${streamId}`, { cwd: testRepo.path });
+
+      const commit1 = makeCommit('Commit 1');
+      const commit2 = makeCommit('Commit 2');
+      const commit3 = makeCommit('Commit 3');
+
+      const cps = diffStacks.createCheckpointsFromStream(
+        tracker.db,
+        testRepo.path,
+        streamId
+      );
+
+      expect(cps).toHaveLength(3);
+      expect(cps[0].commitSha).toBe(commit1);
+      expect(cps[1].commitSha).toBe(commit2);
+      expect(cps[2].commitSha).toBe(commit3);
+      expect(cps[0].streamId).toBe(streamId);
+    });
+
+    it('should reuse existing checkpoints', () => {
+      git.checkout(`stream/${streamId}`, { cwd: testRepo.path });
+
+      const commit1 = makeCommit('Commit 1');
+      const commit2 = makeCommit('Commit 2');
+
+      // Create checkpoint for commit1 manually
+      const existingCp = checkpoints.createCheckpoint(tracker.db, {
+        streamId,
+        commitSha: commit1,
+        message: 'Manually created',
+      });
+
+      const cps = diffStacks.createCheckpointsFromStream(
+        tracker.db,
+        testRepo.path,
+        streamId
+      );
+
+      expect(cps).toHaveLength(2);
+      // First checkpoint should be the existing one
+      expect(cps[0].id).toBe(existingCp.id);
+      // Second checkpoint should be new
+      expect(cps[1].commitSha).toBe(commit2);
+    });
+
+    it('should return empty array when no commits since base', () => {
+      const cps = diffStacks.createCheckpointsFromStream(
+        tracker.db,
+        testRepo.path,
+        streamId
+      );
+
+      expect(cps).toHaveLength(0);
+    });
+
+    it('should throw for non-existent stream', () => {
+      expect(() => {
+        diffStacks.createCheckpointsFromStream(
+          tracker.db,
+          testRepo.path,
+          'nonexistent-stream'
+        );
+      }).toThrow('Stream not found');
+    });
+
+    it('should respect custom commit range', () => {
+      git.checkout(`stream/${streamId}`, { cwd: testRepo.path });
+
+      makeCommit('Commit 1');
+      const commit2 = makeCommit('Commit 2');
+      const commit3 = makeCommit('Commit 3');
+      makeCommit('Commit 4');
+
+      // Get only commit2 and commit3
+      const cps = diffStacks.createCheckpointsFromStream(
+        tracker.db,
+        testRepo.path,
+        streamId,
+        { from: git.resolveRef(`${commit2}^`, { cwd: testRepo.path }), to: commit3 }
+      );
+
+      expect(cps).toHaveLength(2);
+      expect(cps[0].commitSha).toBe(commit2);
+      expect(cps[1].commitSha).toBe(commit3);
+    });
+  });
+
+  describe('createStackFromStream', () => {
+    it('should create a stack with checkpoints from stream', () => {
+      git.checkout(`stream/${streamId}`, { cwd: testRepo.path });
+
+      const commit1 = makeCommit('Commit 1');
+      const commit2 = makeCommit('Commit 2');
+
+      const stack = diffStacks.createStackFromStream(tracker.db, testRepo.path, {
+        streamId,
+        name: 'My Stack',
+        description: 'Test stack',
+        targetBranch: 'main',
+      });
+
+      expect(stack.name).toBe('My Stack');
+      expect(stack.description).toBe('Test stack');
+      expect(stack.targetBranch).toBe('main');
+      expect(stack.reviewStatus).toBe('pending');
+      expect(stack.checkpoints).toHaveLength(2);
+      expect(stack.checkpoints[0].commitSha).toBe(commit1);
+      expect(stack.checkpoints[0].position).toBe(0);
+      expect(stack.checkpoints[1].commitSha).toBe(commit2);
+      expect(stack.checkpoints[1].position).toBe(1);
+    });
+
+    it('should create empty stack when no commits', () => {
+      const stack = diffStacks.createStackFromStream(tracker.db, testRepo.path, {
+        streamId,
+        name: 'Empty Stack',
+      });
+
+      expect(stack.name).toBe('Empty Stack');
+      expect(stack.checkpoints).toHaveLength(0);
+    });
+  });
+
+  describe('cherryPickStackToTarget', () => {
+    it('should cherry-pick approved stack to target', () => {
+      // Create commits on stream
+      git.checkout(`stream/${streamId}`, { cwd: testRepo.path });
+      const commit1 = makeCommit('Feature commit 1');
+      const commit2 = makeCommit('Feature commit 2');
+
+      // Create and approve stack
+      const stack = diffStacks.createStackFromStream(tracker.db, testRepo.path, {
+        streamId,
+        targetBranch: 'main',
+      });
+
+      diffStacks.setStackReviewStatus(tracker.db, {
+        stackId: stack.id,
+        status: 'approved',
+      });
+
+      // Cherry-pick to main
+      const result = diffStacks.cherryPickStackToTarget(
+        tracker.db,
+        testRepo.path,
+        stack.id,
+        testRepo.path
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.cherryPickedCommits).toHaveLength(2);
+      expect(result.cherryPickedCommits[0]).toBe(commit1);
+      expect(result.cherryPickedCommits[1]).toBe(commit2);
+      expect(result.newCommits).toHaveLength(2);
+
+      // Verify stack is marked as merged
+      const updatedStack = diffStacks.getDiffStack(tracker.db, stack.id);
+      expect(updatedStack!.reviewStatus).toBe('merged');
+
+      // Verify commits are on main
+      git.checkout('main', { cwd: testRepo.path });
+      const mainHead = git.getHead({ cwd: testRepo.path });
+      expect(result.newCommits).toContain(mainHead);
+    });
+
+    it('should fail for non-approved stack', () => {
+      git.checkout(`stream/${streamId}`, { cwd: testRepo.path });
+      makeCommit('Feature commit');
+
+      const stack = diffStacks.createStackFromStream(tracker.db, testRepo.path, {
+        streamId,
+      });
+
+      const result = diffStacks.cherryPickStackToTarget(
+        tracker.db,
+        testRepo.path,
+        stack.id,
+        testRepo.path
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('not approved');
+    });
+
+    it('should fail for non-existent stack', () => {
+      const result = diffStacks.cherryPickStackToTarget(
+        tracker.db,
+        testRepo.path,
+        'ds-nonexistent',
+        testRepo.path
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('not found');
+    });
+
+    it('should handle empty stack', () => {
+      const stack = diffStacks.createStackFromStream(tracker.db, testRepo.path, {
+        streamId,
+      });
+
+      diffStacks.setStackReviewStatus(tracker.db, {
+        stackId: stack.id,
+        status: 'approved',
+      });
+
+      const result = diffStacks.cherryPickStackToTarget(
+        tracker.db,
+        testRepo.path,
+        stack.id,
+        testRepo.path
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.cherryPickedCommits).toHaveLength(0);
+      expect(result.newCommits).toHaveLength(0);
+
+      // Stack should still be marked as merged
+      const updatedStack = diffStacks.getDiffStack(tracker.db, stack.id);
+      expect(updatedStack!.reviewStatus).toBe('merged');
+    });
+
+    it('should return conflict info on cherry-pick conflict', () => {
+      // Create stream with a commit that modifies a file
+      git.checkout(`stream/${streamId}`, { cwd: testRepo.path });
+      const filePath = path.join(testRepo.path, 'conflict-file.txt');
+      fs.writeFileSync(filePath, 'stream content');
+      git.stageAll({ cwd: testRepo.path });
+      git.commit('Stream change', { cwd: testRepo.path });
+
+      // Go back to main and create conflicting change
+      git.checkout('main', { cwd: testRepo.path });
+      fs.writeFileSync(filePath, 'main content');
+      git.stageAll({ cwd: testRepo.path });
+      git.commit('Main change', { cwd: testRepo.path });
+
+      // Create and approve stack
+      const stack = diffStacks.createStackFromStream(tracker.db, testRepo.path, {
+        streamId,
+        targetBranch: 'main',
+      });
+
+      diffStacks.setStackReviewStatus(tracker.db, {
+        stackId: stack.id,
+        status: 'approved',
+      });
+
+      // Cherry-pick should fail with conflict
+      const result = diffStacks.cherryPickStackToTarget(
+        tracker.db,
+        testRepo.path,
+        stack.id,
+        testRepo.path
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Conflict');
+      expect(result.conflicts).toBeDefined();
+      expect(result.conflicts!.length).toBeGreaterThan(0);
+
+      // Stack should NOT be marked as merged
+      const updatedStack = diffStacks.getDiffStack(tracker.db, stack.id);
+      expect(updatedStack!.reviewStatus).toBe('approved');
+    });
+  });
 });

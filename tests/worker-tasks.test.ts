@@ -946,4 +946,108 @@ describe('Worker Tasks', () => {
       expect(name3.includes('/task-2@')).toBe(true);
     });
   });
+
+  describe('Tracker API', () => {
+    it('should expose task methods on tracker instance', () => {
+      // Create task via tracker
+      const taskId = tracker.createTask({
+        title: 'Tracker API Task',
+        streamId,
+      });
+
+      // Get task via tracker
+      const task = tracker.getTask(taskId);
+      expect(task).not.toBeNull();
+      expect(task!.title).toBe('Tracker API Task');
+
+      // List tasks via tracker
+      const tasks = tracker.listTasks(streamId);
+      expect(tasks).toHaveLength(1);
+    });
+
+    it('should support full task lifecycle via tracker', () => {
+      const taskId = tracker.createTask({
+        title: 'Full Lifecycle Task',
+        streamId,
+      });
+
+      const worktree = createWorktree('agent-1');
+
+      // Start task via tracker
+      const startResult = tracker.startTask({
+        taskId,
+        agentId: 'agent-1',
+        worktree,
+      });
+
+      expect(startResult.branchName).toMatch(/^worker\/agent-1\//);
+
+      // Make a commit
+      commitInWorktree(worktree, 'feature.ts', 'code', 'Add feature');
+
+      // Complete task via tracker
+      const completeResult = tracker.completeTask({
+        taskId,
+        worktree,
+      });
+
+      expect(completeResult.mergeCommit).toBeDefined();
+
+      // Verify task is completed
+      const task = tracker.getTask(taskId);
+      expect(task!.status).toBe('completed');
+    });
+
+    it('should support abandon and release via tracker', () => {
+      const taskId = tracker.createTask({
+        title: 'Abandon Test',
+        streamId,
+      });
+
+      const worktree = createWorktree('agent-1');
+
+      tracker.startTask({
+        taskId,
+        agentId: 'agent-1',
+        worktree,
+      });
+
+      // Release via tracker
+      tracker.releaseTask(taskId);
+      let task = tracker.getTask(taskId);
+      expect(task!.status).toBe('open');
+
+      // Restart and abandon
+      tracker.startTask({
+        taskId,
+        agentId: 'agent-1',
+        worktree,
+      });
+
+      tracker.abandonTask(taskId);
+      task = tracker.getTask(taskId);
+      expect(task!.status).toBe('abandoned');
+    });
+
+    it('should support cleanup via tracker', () => {
+      const taskId = tracker.createTask({
+        title: 'Cleanup Test',
+        streamId,
+      });
+
+      const worktree = createWorktree('agent-1');
+
+      tracker.startTask({
+        taskId,
+        agentId: 'agent-1',
+        worktree,
+      });
+
+      tracker.abandonTask(taskId, { deleteBranch: false });
+
+      // Cleanup via tracker
+      const result = tracker.cleanupWorkerBranches();
+      expect(result.deleted.length).toBeGreaterThanOrEqual(0);
+    });
+  });
 });

@@ -208,7 +208,7 @@ export function resetHard(commit: string, options: GitOptions): void {
 }
 
 /**
- * Cherry-pick a commit.
+ * Cherry-pick a commit (stages changes but does not commit).
  */
 export function cherryPick(
   commit: string,
@@ -221,6 +221,68 @@ export function cherryPick(
     const conflicts = getConflictedFiles(options);
     return { success: false, conflicts };
   }
+}
+
+/**
+ * Check if a commit is a merge commit (has multiple parents).
+ */
+export function isMergeCommit(commit: string, options: GitOptions): boolean {
+  // Get parent count - merge commits have 2+ parents
+  const parents = git(['rev-parse', `${commit}^@`], options);
+  const parentCount = parents.split('\n').filter(Boolean).length;
+  return parentCount > 1;
+}
+
+/**
+ * Cherry-pick a commit and create a new commit (preserves commit message).
+ * For merge commits, uses -m 1 to follow the first parent (main line).
+ * Skips empty cherry-picks (when changes already exist on target).
+ */
+export function cherryPickWithCommit(
+  commit: string,
+  options: GitOptions
+): { success: boolean; newCommit?: string; conflicts: string[]; skipped?: boolean } {
+  try {
+    const args = ['cherry-pick'];
+
+    // Handle merge commits with -m 1 (follow first parent)
+    if (isMergeCommit(commit, options)) {
+      args.push('-m', '1');
+    }
+
+    args.push(commit);
+
+    const headBefore = getHead(options);
+    try {
+      git(args, options);
+    } catch (error) {
+      // Check if this is an empty cherry-pick (no changes to apply)
+      const errorStr = String(error);
+      if (errorStr.includes('cherry-pick is now empty') || errorStr.includes('nothing to commit')) {
+        // Skip this empty cherry-pick
+        try {
+          git(['cherry-pick', '--skip'], options);
+        } catch {
+          // Ignore skip errors
+        }
+        return { success: true, newCommit: headBefore, conflicts: [], skipped: true };
+      }
+      throw error;
+    }
+
+    const newCommit = getHead(options);
+    return { success: true, newCommit, conflicts: [] };
+  } catch {
+    const conflicts = getConflictedFiles(options);
+    return { success: false, conflicts };
+  }
+}
+
+/**
+ * Abort a cherry-pick in progress.
+ */
+export function cherryPickAbort(options: GitOptions): void {
+  git(['cherry-pick', '--abort'], options);
 }
 
 /**

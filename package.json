@@ -20,6 +20,8 @@
     "dev": "tsx watch src/index.ts",
     "test": "vitest",
     "test:run": "vitest run",
+    "test:all": "RUN_SLOW_TESTS=true vitest run",
+    "test:e2e": "RUN_SLOW_TESTS=true vitest run tests/e2e",
     "lint": "eslint src --ext .ts",
     "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\"",
     "typecheck": "tsc --noEmit",
