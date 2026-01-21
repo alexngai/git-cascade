@@ -226,6 +226,90 @@ const MIGRATIONS: DataplaneMigration[] = [
       );
     },
   },
+  {
+    version: 4,
+    name: "add-worker-tasks",
+    up: (db: Database.Database, prefix: string) => {
+      // Check if worker_tasks table already exists
+      const workerTasksTables = db
+        .prepare(
+          `SELECT name FROM sqlite_master WHERE type='table' AND name='${prefix}worker_tasks'`
+        )
+        .all() as Array<{ name: string }>;
+
+      if (workerTasksTables.length === 0) {
+        // Create worker_tasks table - ephemeral branches for stream work
+        db.exec(`
+          CREATE TABLE ${prefix}worker_tasks (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            stream_id TEXT NOT NULL,
+            agent_id TEXT,
+            branch_name TEXT,
+            status TEXT NOT NULL DEFAULT 'open',
+            start_commit TEXT,
+            merge_commit TEXT,
+            created_at INTEGER NOT NULL,
+            started_at INTEGER,
+            completed_at INTEGER,
+            priority INTEGER NOT NULL DEFAULT 100,
+            metadata TEXT NOT NULL DEFAULT '{}',
+            FOREIGN KEY (stream_id) REFERENCES ${prefix}streams(id)
+          );
+        `);
+
+        // Create indexes for worker_tasks
+        db.exec(`
+          CREATE INDEX IF NOT EXISTS ${prefix}idx_worker_tasks_stream ON ${prefix}worker_tasks(stream_id);
+          CREATE INDEX IF NOT EXISTS ${prefix}idx_worker_tasks_status ON ${prefix}worker_tasks(status);
+          CREATE INDEX IF NOT EXISTS ${prefix}idx_worker_tasks_agent ON ${prefix}worker_tasks(agent_id);
+        `);
+
+        console.log(`  ✓ Created ${prefix}worker_tasks table`);
+      }
+
+      // Check if task_merges table already exists
+      const taskMergesTables = db
+        .prepare(
+          `SELECT name FROM sqlite_master WHERE type='table' AND name='${prefix}task_merges'`
+        )
+        .all() as Array<{ name: string }>;
+
+      if (taskMergesTables.length === 0) {
+        // Create task_merges table - audit trail for task completions
+        db.exec(`
+          CREATE TABLE ${prefix}task_merges (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            source_branch TEXT NOT NULL,
+            source_commit TEXT NOT NULL,
+            target_stream_id TEXT NOT NULL,
+            merge_commit TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            created_by TEXT,
+            metadata TEXT NOT NULL DEFAULT '{}',
+            FOREIGN KEY (task_id) REFERENCES ${prefix}worker_tasks(id),
+            FOREIGN KEY (target_stream_id) REFERENCES ${prefix}streams(id)
+          );
+        `);
+
+        // Create indexes for task_merges
+        db.exec(`
+          CREATE INDEX IF NOT EXISTS ${prefix}idx_task_merges_task ON ${prefix}task_merges(task_id);
+          CREATE INDEX IF NOT EXISTS ${prefix}idx_task_merges_target ON ${prefix}task_merges(target_stream_id);
+        `);
+
+        console.log(`  ✓ Created ${prefix}task_merges table`);
+      }
+
+      console.log(`  ✓ Completed worker tasks schema migration`);
+    },
+    down: (db: Database.Database, prefix: string) => {
+      db.exec(`DROP TABLE IF EXISTS ${prefix}task_merges;`);
+      db.exec(`DROP TABLE IF EXISTS ${prefix}worker_tasks;`);
+      console.log(`  ✓ Dropped worker_tasks and task_merges tables`);
+    },
+  },
 ];
 
 /**
