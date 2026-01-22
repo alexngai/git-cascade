@@ -697,7 +697,7 @@ export function cleanupWorkerBranches(
     const taskObj = rowToTask(task);
 
     // Delete completed tasks older than threshold
-    if (taskObj.status === 'completed' && taskObj.completedAt && taskObj.completedAt < cutoff) {
+    if (taskObj.status === 'completed' && taskObj.completedAt && taskObj.completedAt <= cutoff) {
       try {
         git.deleteBranch(branchName, true, gitOpts);
         // Clear branch name from task record
