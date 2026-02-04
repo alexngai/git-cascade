@@ -326,6 +326,17 @@ export class MultiAgentRepoTracker {
     return streams.rebaseOntoStream(this.db, this.repoPath, options);
   }
 
+  /**
+   * Async version of rebaseOntoStream that properly supports async conflict handlers.
+   *
+   * Use this when you need to provide an async conflictHandler that should be awaited.
+   * The sync version (rebaseOntoStream) will return immediately with pendingAsyncResolution=true
+   * when a conflictHandler is provided with onConflict='agent'.
+   */
+  async rebaseOntoStreamAsync(options: RebaseOntoStreamOptions): Promise<RebaseResult> {
+    return streams.rebaseOntoStreamAsync(this.db, this.repoPath, options);
+  }
+
   syncWithParent(
     streamId: string,
     agentId: string,
@@ -486,11 +497,21 @@ export class MultiAgentRepoTracker {
     });
 
     // Record operation
+    // Handle the case where this is the first commit (HEAD~1 doesn't exist)
+    let beforeState: string;
+    try {
+      beforeState = git.resolveRef('HEAD~1', gitOpts);
+    } catch {
+      // If HEAD~1 doesn't exist, use the empty tree hash or the commit itself
+      // The empty tree is a well-known SHA in git representing no files
+      beforeState = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+    }
+
     this.recordOperation({
       streamId: options.streamId,
       agentId: options.agentId,
       opType: 'commit',
-      beforeState: git.resolveRef('HEAD~1', gitOpts),
+      beforeState,
       afterState: result.commit,
       metadata: { changeId: result.changeId },
     });

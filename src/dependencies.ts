@@ -39,6 +39,9 @@ export function getDependencies(
 
 /**
  * Get streams that depend on a given stream (reverse lookup).
+ *
+ * Uses SQLite's JSON functions for efficient in-database filtering
+ * instead of loading all rows and parsing JSON in JavaScript.
  */
 export function getDependents(
   db: Database.Database,
@@ -46,20 +49,15 @@ export function getDependents(
 ): string[] {
   const t = getTables(db);
 
-  // We need to scan all dependencies and check if they contain streamId
+  // Use SQLite's json_each to efficiently search within the JSON array
+  // This avoids loading all rows and parsing JSON in JavaScript
   const rows = db.prepare(`
-    SELECT stream_id, depends_on FROM ${t.dependencies}
-  `).all() as { stream_id: string; depends_on: string }[];
+    SELECT DISTINCT d.stream_id
+    FROM ${t.dependencies} d, json_each(d.depends_on) AS dep
+    WHERE dep.value = ?
+  `).all(streamId) as { stream_id: string }[];
 
-  const dependents: string[] = [];
-  for (const row of rows) {
-    const deps = JSON.parse(row.depends_on) as string[];
-    if (deps.includes(streamId)) {
-      dependents.push(row.stream_id);
-    }
-  }
-
-  return dependents;
+  return rows.map(row => row.stream_id);
 }
 
 /**

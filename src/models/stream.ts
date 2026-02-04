@@ -84,11 +84,22 @@ export interface MergeStreamOptions {
   strategy?: MergeStrategy;
 }
 
+/**
+ * Type of error that occurred during merge.
+ */
+export type MergeErrorType =
+  | 'conflict'       // Merge conflicts occurred (recoverable with resolution)
+  | 'git_error'      // Git operation failed (may be retryable)
+  | 'invalid_state'  // Stream in invalid state for merge (e.g., conflicted)
+  | 'unknown';       // Unknown error
+
 export interface MergeResult {
   success: boolean;
   newHead?: string;
   conflicts?: string[];
   error?: string;
+  /** Type of error if merge failed - helps distinguish recoverable vs non-recoverable */
+  errorType?: MergeErrorType;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -225,6 +236,12 @@ export interface RebaseResult {
   error?: string;
   /** Result of cascade rebase (if cascade was enabled) */
   cascadeResult?: import('./dependency.js').CascadeResult;
+  /**
+   * True if async conflict resolution is pending.
+   * When this is true, the caller should use rebaseOntoStreamAsync
+   * to properly await the conflict handler.
+   */
+  pendingAsyncResolution?: boolean;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

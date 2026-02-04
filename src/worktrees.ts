@@ -123,6 +123,14 @@ export function updateWorktreeStream(
 
   const now = Date.now();
 
+  // Validate worktree path exists before attempting git operations
+  if (!fs.existsSync(worktree.path)) {
+    throw new WorktreeError(
+      `Worktree path does not exist: ${worktree.path}`,
+      worktree.path
+    );
+  }
+
   if (streamId) {
     // Get the branch name from the stream (handles local mode)
     const branchName = streams.getStreamBranchName(db, streamId);
@@ -130,7 +138,8 @@ export function updateWorktreeStream(
       git.checkout(branchName, { cwd: worktree.path });
     } catch (error) {
       throw new WorktreeError(
-        `Failed to checkout stream ${streamId}: ${error instanceof Error ? error.message : String(error)}`
+        `Failed to checkout stream ${streamId}: ${error instanceof Error ? error.message : String(error)}`,
+        worktree.path
       );
     }
   } else {
@@ -342,6 +351,14 @@ function createSequentialProvider(
   const worktreePath = options.worktreePath;
   if (!worktreePath) {
     throw new WorktreeError('Sequential mode requires a worktreePath');
+  }
+
+  // Validate worktree path exists upfront
+  if (!fs.existsSync(worktreePath)) {
+    throw new WorktreeError(
+      `Worktree path does not exist: ${worktreePath}`,
+      worktreePath
+    );
   }
 
   return {
