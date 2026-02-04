@@ -240,4 +240,149 @@ describe('Stream Operations', () => {
       expect(child!.parentStream).toBe(parentId);
     });
   });
+
+  describe('pauseStream', () => {
+    it('should pause an active stream', () => {
+      const streamId = tracker.createStream({
+        name: 'to-pause',
+        agentId: 'agent-1',
+      });
+
+      tracker.pauseStream(streamId, 'Taking a break');
+
+      const stream = tracker.getStream(streamId);
+      expect(stream!.status).toBe('paused');
+      expect(stream!.metadata.pauseReason).toBe('Taking a break');
+      expect(stream!.metadata.pausedAt).toBeDefined();
+    });
+
+    it('should throw when pausing non-active stream', () => {
+      const streamId = tracker.createStream({
+        name: 'to-pause',
+        agentId: 'agent-1',
+      });
+
+      tracker.abandonStream(streamId);
+
+      expect(() => tracker.pauseStream(streamId)).toThrow(
+        /Cannot pause stream.*status is 'abandoned'/
+      );
+    });
+
+    it('should throw when pausing already paused stream', () => {
+      const streamId = tracker.createStream({
+        name: 'to-pause',
+        agentId: 'agent-1',
+      });
+
+      tracker.pauseStream(streamId);
+
+      expect(() => tracker.pauseStream(streamId)).toThrow(
+        /Cannot pause stream.*status is 'paused'/
+      );
+    });
+  });
+
+  describe('resumeStream', () => {
+    it('should resume a paused stream', () => {
+      const streamId = tracker.createStream({
+        name: 'to-resume',
+        agentId: 'agent-1',
+      });
+
+      tracker.pauseStream(streamId, 'Taking a break');
+      tracker.resumeStream(streamId);
+
+      const stream = tracker.getStream(streamId);
+      expect(stream!.status).toBe('active');
+      expect(stream!.metadata.pauseReason).toBeUndefined();
+      expect(stream!.metadata.pausedAt).toBeUndefined();
+    });
+
+    it('should throw when resuming non-paused stream', () => {
+      const streamId = tracker.createStream({
+        name: 'not-paused',
+        agentId: 'agent-1',
+      });
+
+      expect(() => tracker.resumeStream(streamId)).toThrow(
+        /Cannot resume stream.*status is 'active'/
+      );
+    });
+  });
+
+  describe('trackExistingBranch', () => {
+    it('should track an existing branch', () => {
+      // Create a branch manually
+      const { execSync } = require('child_process');
+      execSync('git checkout -b existing-feature', { cwd: testRepo.path, stdio: 'pipe' });
+      commitFile(testRepo.path, 'feature.txt', 'content', 'Feature commit');
+      execSync('git checkout main', { cwd: testRepo.path, stdio: 'pipe' });
+
+      const streamId = tracker.trackExistingBranch({
+        branch: 'existing-feature',
+        agentId: 'agent-1',
+      });
+
+      const stream = tracker.getStream(streamId);
+      expect(stream).not.toBeNull();
+      expect(stream!.isLocalMode).toBe(true);
+      expect(stream!.existingBranch).toBe('existing-feature');
+      expect(stream!.name).toBe('existing-feature'); // Default name
+    });
+
+    it('should use custom name when provided', () => {
+      const { execSync } = require('child_process');
+      execSync('git checkout -b my-branch', { cwd: testRepo.path, stdio: 'pipe' });
+      commitFile(testRepo.path, 'file.txt', 'content', 'Commit');
+      execSync('git checkout main', { cwd: testRepo.path, stdio: 'pipe' });
+
+      const streamId = tracker.trackExistingBranch({
+        branch: 'my-branch',
+        name: 'Custom Name',
+        agentId: 'agent-1',
+      });
+
+      const stream = tracker.getStream(streamId);
+      expect(stream!.name).toBe('Custom Name');
+    });
+
+    it('should throw when tracking non-existent branch', () => {
+      expect(() =>
+        tracker.trackExistingBranch({
+          branch: 'non-existent-branch',
+          agentId: 'agent-1',
+        })
+      ).toThrow(/Branch not found/);
+    });
+  });
+
+  describe('error handling', () => {
+    it('should throw when getting non-existent stream', () => {
+      const stream = tracker.getStream('non-existent');
+      expect(stream).toBeNull();
+    });
+
+    it('should throw when updating non-existent stream', () => {
+      expect(() => tracker.updateStream('non-existent', { name: 'new' })).toThrow(
+        /Stream not found/
+      );
+    });
+
+    it('should throw when abandoning non-existent stream', () => {
+      expect(() => tracker.abandonStream('non-existent')).toThrow(
+        /Stream not found/
+      );
+    });
+
+    it('should throw when forking from non-existent parent', () => {
+      expect(() =>
+        tracker.forkStream({
+          parentStreamId: 'non-existent',
+          name: 'child',
+          agentId: 'agent-1',
+        })
+      ).toThrow(/Stream not found/);
+    });
+  });
 });

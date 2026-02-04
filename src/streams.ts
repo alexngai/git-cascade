@@ -153,6 +153,70 @@ export function createStream(
 }
 
 /**
+ * Options for tracking an existing branch.
+ */
+export interface TrackExistingBranchOptions {
+  /** Name of the existing branch to track */
+  branch: string;
+  /** Human-readable name for the stream (defaults to branch name) */
+  name?: string;
+  /** Agent creating the stream */
+  agentId: string;
+  /** Parent stream ID if this branch was forked from another stream */
+  parentStream?: string;
+  /** Enable stacked review workflow */
+  enableStackedReview?: boolean;
+  /** Additional metadata */
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Track an existing git branch as a stream (local mode).
+ *
+ * This is a convenience function that creates a stream in "local mode",
+ * which tracks an existing branch without creating a new `stream/<id>` branch.
+ *
+ * Use this when:
+ * - You have an existing branch you want to track in the dataplane
+ * - You want to use dataplane's conflict tracking on existing branches
+ * - You're integrating with existing git workflows
+ *
+ * @example
+ * ```typescript
+ * const streamId = trackExistingBranch(db, repoPath, {
+ *   branch: 'feature/my-feature',
+ *   agentId: 'agent-1',
+ * });
+ * ```
+ *
+ * @param db Database instance
+ * @param repoPath Repository path
+ * @param options Options for tracking the branch
+ * @returns The new stream ID
+ */
+export function trackExistingBranch(
+  db: Database.Database,
+  repoPath: string,
+  options: TrackExistingBranchOptions
+): string {
+  // Verify the branch exists
+  const branchExists = git.refExists(options.branch, { cwd: repoPath });
+  if (!branchExists) {
+    throw new BranchNotFoundError(options.branch);
+  }
+
+  return createStream(db, repoPath, {
+    name: options.name ?? options.branch,
+    agentId: options.agentId,
+    existingBranch: options.branch,
+    createBranch: false,
+    parentStream: options.parentStream,
+    enableStackedReview: options.enableStackedReview,
+    metadata: options.metadata,
+  });
+}
+
+/**
  * Get a stream by ID.
  */
 export function getStream(
@@ -340,6 +404,90 @@ export function abandonStream(
 }
 
 /**
+ * Pause a stream (temporarily halt work).
+ *
+ * Paused streams cannot have commits made to them until resumed.
+ * This is useful for temporarily stopping work without abandoning the stream.
+ *
+ * @param db Database instance
+ * @param streamId Stream to pause
+ * @param reason Optional reason for pausing
+ */
+export function pauseStream(
+  db: Database.Database,
+  streamId: string,
+  reason?: string
+): void {
+  const stream = getStreamOrThrow(db, streamId);
+  const now = Date.now();
+  const t = getTables(db);
+
+  // Can only pause active streams
+  if (stream.status !== 'active') {
+    throw new Error(
+      `Cannot pause stream ${streamId}: status is '${stream.status}', expected 'active'`
+    );
+  }
+
+  const metadata = {
+    ...stream.metadata,
+    pausedAt: now,
+    pauseReason: reason,
+  };
+
+  db.prepare(`
+    UPDATE ${t.streams} SET status = 'paused', updated_at = ?, metadata = ?
+    WHERE id = ?
+  `).run(now, JSON.stringify(metadata), streamId);
+}
+
+/**
+ * Resume a paused stream.
+ *
+ * @param db Database instance
+ * @param streamId Stream to resume
+ */
+export function resumeStream(
+  db: Database.Database,
+  streamId: string
+): void {
+  const stream = getStreamOrThrow(db, streamId);
+  const now = Date.now();
+  const t = getTables(db);
+
+  // Can only resume paused streams
+  if (stream.status !== 'paused') {
+    throw new Error(
+      `Cannot resume stream ${streamId}: status is '${stream.status}', expected 'paused'`
+    );
+  }
+
+  // Remove pause-related metadata
+  const { pausedAt: _, pauseReason: __, ...cleanMetadata } = stream.metadata as {
+    pausedAt?: number;
+    pauseReason?: string;
+    [key: string]: unknown;
+  };
+
+  db.prepare(`
+    UPDATE ${t.streams} SET status = 'active', updated_at = ?, metadata = ?
+    WHERE id = ?
+  `).run(now, JSON.stringify(cleanMetadata), streamId);
+}
+
+/**
+ * Check if a stream is paused and throw if so.
+ * Used internally to block operations on paused streams.
+ */
+function assertStreamNotPaused(stream: Stream): void {
+  if (stream.status === 'paused') {
+    throw new Error(
+      `Stream ${stream.id} is paused - resume it before proceeding`
+    );
+  }
+}
+
+/**
  * Set a stream to conflicted status.
  * Called when a rebase/merge encounters conflicts that need resolution.
  */
@@ -496,9 +644,11 @@ export function mergeStream(
   const source = getStreamOrThrow(db, options.sourceStream);
   const target = getStreamOrThrow(db, options.targetStream);
 
-  // Block if either stream is conflicted
+  // Block if either stream is conflicted or paused
   assertStreamNotConflicted(source);
   assertStreamNotConflicted(target);
+  assertStreamNotPaused(source);
+  assertStreamNotPaused(target);
 
   const sourceBranch = `stream/${source.id}`;
   const targetBranch = `stream/${options.targetStream}`;
@@ -917,8 +1067,9 @@ export function rebaseOntoStream(
   const source = getStreamOrThrow(db, sourceStream);
   const target = getStreamOrThrow(db, targetStream);
 
-  // Block if source stream is conflicted (target can be rebased onto)
+  // Block if source stream is conflicted or paused (target can be rebased onto)
   assertStreamNotConflicted(source);
+  assertStreamNotPaused(source);
 
   const sourceBranch = `stream/${sourceStream}`;
   const targetBranch = `stream/${target.id}`;
@@ -1092,8 +1243,9 @@ export async function rebaseOntoStreamAsync(
   const source = getStreamOrThrow(db, sourceStream);
   const target = getStreamOrThrow(db, targetStream);
 
-  // Block if source stream is conflicted
+  // Block if source stream is conflicted or paused
   assertStreamNotConflicted(source);
+  assertStreamNotPaused(source);
 
   const sourceBranch = `stream/${sourceStream}`;
   const targetBranch = `stream/${target.id}`;

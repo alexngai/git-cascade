@@ -396,10 +396,48 @@ export class MultiAgentRepoTracker {
   }
 
   /**
-   * @deprecated Use getStreamHierarchy instead
+   * @deprecated Use getStreamHierarchy instead. This method will be removed in a future version.
    */
   getStreamGraph(rootStreamId?: string): StreamNode | StreamNode[] {
-    return streams.getStreamGraph(this.db, rootStreamId);
+    console.warn(
+      'getStreamGraph is deprecated and will be removed in a future version. ' +
+      'Use getStreamHierarchy instead.'
+    );
+    return streams.getStreamHierarchy(this.db, rootStreamId);
+  }
+
+  /**
+   * Track an existing git branch as a stream (local mode).
+   *
+   * This is a convenience function for creating streams that track existing branches
+   * without creating new `stream/<id>` branches.
+   *
+   * @example
+   * ```typescript
+   * const streamId = tracker.trackExistingBranch({
+   *   branch: 'feature/my-feature',
+   *   agentId: 'agent-1',
+   * });
+   * ```
+   */
+  trackExistingBranch(options: streams.TrackExistingBranchOptions): string {
+    return streams.trackExistingBranch(this.db, this.repoPath, options);
+  }
+
+  /**
+   * Pause a stream (temporarily halt work).
+   *
+   * Paused streams cannot have commits made to them until resumed.
+   */
+  pauseStream(streamId: string, reason?: string): void {
+    return streams.pauseStream(this.db, streamId, reason);
+  }
+
+  /**
+   * Resume a paused stream.
+   */
+  resumeStream(streamId: string): void {
+    return streams.resumeStream(this.db, streamId);
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
