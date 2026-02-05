@@ -6,6 +6,8 @@
 
 import { execSync, ExecSyncOptions } from 'child_process';
 import * as crypto from 'crypto';
+import * as fs from 'fs';
+import * as path from 'path';
 import { GitOperationError, BranchNotFoundError } from '../errors.js';
 
 export interface GitOptions {
@@ -317,7 +319,6 @@ export function isRebaseInProgress(options: GitOptions): boolean {
 
   try {
     // Check for rebase-merge (interactive) or rebase-apply (standard)
-    const fs = require('fs');
     return fs.existsSync(rebaseDir) || fs.existsSync(rebaseApplyDir);
   } catch {
     return false;
@@ -335,8 +336,6 @@ export function getRebaseState(
   }
 
   const gitDir = git(['rev-parse', '--git-dir'], options).trim();
-  const fs = require('fs');
-  const path = require('path');
 
   // Try rebase-merge first (interactive rebase)
   const rebaseMergeDir = path.join(options.cwd, gitDir, 'rebase-merge');
@@ -686,10 +685,13 @@ export function extractChangeId(commitMsg: string): string | null {
     if (trimmed.startsWith('Change-Id: ')) {
       return trimmed.slice(11).trim(); // Remove "Change-Id: " prefix
     }
-    // Stop searching if we hit a non-trailer line (empty line or doesn't look like a trailer)
-    if (trimmed === '' || (!trimmed.includes(': ') && !trimmed.startsWith('Change-Id:'))) {
-      // Continue searching - trailers can have blank lines between them
+    // Allow blank lines between trailers
+    if (trimmed === '') {
       continue;
+    }
+    // Stop searching when we hit a non-trailer line (doesn't look like "Key: value")
+    if (!trimmed.includes(': ') && !trimmed.startsWith('Change-Id:')) {
+      break;
     }
   }
   return null;
