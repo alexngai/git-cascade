@@ -153,6 +153,70 @@ export function createStream(
 }
 
 /**
+ * Options for tracking an existing branch.
+ */
+export interface TrackExistingBranchOptions {
+  /** Name of the existing branch to track */
+  branch: string;
+  /** Human-readable name for the stream (defaults to branch name) */
+  name?: string;
+  /** Agent creating the stream */
+  agentId: string;
+  /** Parent stream ID if this branch was forked from another stream */
+  parentStream?: string;
+  /** Enable stacked review workflow */
+  enableStackedReview?: boolean;
+  /** Additional metadata */
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Track an existing git branch as a stream (local mode).
+ *
+ * This is a convenience function that creates a stream in "local mode",
+ * which tracks an existing branch without creating a new `stream/<id>` branch.
+ *
+ * Use this when:
+ * - You have an existing branch you want to track in the dataplane
+ * - You want to use dataplane's conflict tracking on existing branches
+ * - You're integrating with existing git workflows
+ *
+ * @example
+ * ```typescript
+ * const streamId = trackExistingBranch(db, repoPath, {
+ *   branch: 'feature/my-feature',
+ *   agentId: 'agent-1',
+ * });
+ * ```
+ *
+ * @param db Database instance
+ * @param repoPath Repository path
+ * @param options Options for tracking the branch
+ * @returns The new stream ID
+ */
+export function trackExistingBranch(
+  db: Database.Database,
+  repoPath: string,
+  options: TrackExistingBranchOptions
+): string {
+  // Verify the branch exists
+  const branchExists = git.refExists(options.branch, { cwd: repoPath });
+  if (!branchExists) {
+    throw new BranchNotFoundError(options.branch);
+  }
+
+  return createStream(db, repoPath, {
+    name: options.name ?? options.branch,
+    agentId: options.agentId,
+    existingBranch: options.branch,
+    createBranch: false,
+    parentStream: options.parentStream,
+    enableStackedReview: options.enableStackedReview,
+    metadata: options.metadata,
+  });
+}
+
+/**
  * Get a stream by ID.
  */
 export function getStream(
@@ -340,6 +404,90 @@ export function abandonStream(
 }
 
 /**
+ * Pause a stream (temporarily halt work).
+ *
+ * Paused streams cannot have commits made to them until resumed.
+ * This is useful for temporarily stopping work without abandoning the stream.
+ *
+ * @param db Database instance
+ * @param streamId Stream to pause
+ * @param reason Optional reason for pausing
+ */
+export function pauseStream(
+  db: Database.Database,
+  streamId: string,
+  reason?: string
+): void {
+  const stream = getStreamOrThrow(db, streamId);
+  const now = Date.now();
+  const t = getTables(db);
+
+  // Can only pause active streams
+  if (stream.status !== 'active') {
+    throw new Error(
+      `Cannot pause stream ${streamId}: status is '${stream.status}', expected 'active'`
+    );
+  }
+
+  const metadata = {
+    ...stream.metadata,
+    pausedAt: now,
+    pauseReason: reason,
+  };
+
+  db.prepare(`
+    UPDATE ${t.streams} SET status = 'paused', updated_at = ?, metadata = ?
+    WHERE id = ?
+  `).run(now, JSON.stringify(metadata), streamId);
+}
+
+/**
+ * Resume a paused stream.
+ *
+ * @param db Database instance
+ * @param streamId Stream to resume
+ */
+export function resumeStream(
+  db: Database.Database,
+  streamId: string
+): void {
+  const stream = getStreamOrThrow(db, streamId);
+  const now = Date.now();
+  const t = getTables(db);
+
+  // Can only resume paused streams
+  if (stream.status !== 'paused') {
+    throw new Error(
+      `Cannot resume stream ${streamId}: status is '${stream.status}', expected 'paused'`
+    );
+  }
+
+  // Remove pause-related metadata
+  const { pausedAt: _, pauseReason: __, ...cleanMetadata } = stream.metadata as {
+    pausedAt?: number;
+    pauseReason?: string;
+    [key: string]: unknown;
+  };
+
+  db.prepare(`
+    UPDATE ${t.streams} SET status = 'active', updated_at = ?, metadata = ?
+    WHERE id = ?
+  `).run(now, JSON.stringify(cleanMetadata), streamId);
+}
+
+/**
+ * Check if a stream is paused and throw if so.
+ * Used internally to block operations on paused streams.
+ */
+function assertStreamNotPaused(stream: Stream): void {
+  if (stream.status === 'paused') {
+    throw new Error(
+      `Stream ${stream.id} is paused - resume it before proceeding`
+    );
+  }
+}
+
+/**
  * Set a stream to conflicted status.
  * Called when a rebase/merge encounters conflicts that need resolution.
  */
@@ -496,9 +644,11 @@ export function mergeStream(
   const source = getStreamOrThrow(db, options.sourceStream);
   const target = getStreamOrThrow(db, options.targetStream);
 
-  // Block if either stream is conflicted
+  // Block if either stream is conflicted or paused
   assertStreamNotConflicted(source);
   assertStreamNotConflicted(target);
+  assertStreamNotPaused(source);
+  assertStreamNotPaused(target);
 
   const sourceBranch = `stream/${source.id}`;
   const targetBranch = `stream/${options.targetStream}`;
@@ -541,14 +691,27 @@ export function mergeStream(
     return { success: true, newHead };
   } catch (error) {
     // Check for conflicts
-    const conflicts = git.getConflictedFiles(gitOpts);
-    if (conflicts.length > 0) {
+    const conflictedFiles = git.getConflictedFiles(gitOpts);
+    if (conflictedFiles.length > 0) {
       git.mergeAbort(gitOpts);
-      return { success: false, conflicts };
+      return {
+        success: false,
+        conflicts: conflictedFiles,
+        errorType: 'conflict',
+        error: `Merge conflicts in ${conflictedFiles.length} file(s)`,
+      };
     }
+
+    // Determine if this is a recoverable git error
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const isGitError = errorMessage.includes('git') ||
+                       errorMessage.includes('merge') ||
+                       errorMessage.includes('rebase');
+
     return {
       success: false,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage,
+      errorType: isGitError ? 'git_error' : 'unknown',
     };
   }
 }
@@ -599,15 +762,19 @@ export function getStreamBranchName(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Handle agent-based conflict resolution during rebase.
+ * Handle agent-based conflict resolution during rebase (synchronous version).
  *
- * Flow:
+ * When a conflictHandler is provided, this function defers resolution by:
+ * 1. Recording the conflict
+ * 2. Setting stream to 'conflicted'
+ * 3. Aborting the in-progress rebase
+ * 4. Returning with conflictId for async resolution via rebaseOntoStreamAsync
+ *
+ * Flow without handler:
  * 1. Try rebase, detect conflict
  * 2. Create conflict record
  * 3. Set stream to 'conflicted'
- * 4. If handler provided, call it with timeout
- * 5. On success: verify, continue rebase, resolve conflict
- * 6. On failure: abort rebase, abandon conflict
+ * 4. Return with conflict info for manual resolution
  */
 function handleAgentConflictResolution(
   db: Database.Database,
@@ -623,6 +790,94 @@ function handleAgentConflictResolution(
   agentId: string,
   worktree: string
 ): RebaseResult {
+  const { conflictHandler } = options;
+
+  // Try the rebase
+  const result = git.rebaseOnto(targetHead, source.baseCommit, sourceBranch, gitOpts);
+
+  if (result.success) {
+    // No conflicts - complete successfully
+    updateBaseCommit(db, sourceStream, targetHead);
+    if (source.enableStackedReview) {
+      stacks.rebuildStack(db, worktree, sourceStream);
+    }
+    const newCommits = git.getCommitRange(targetHead, sourceBranch, gitOpts);
+    const commitMapping = changes.buildRebaseCommitMapping(worktree, commits, newCommits);
+    changes.rebuildChangesAfterRebase(db, sourceStream, commitMapping);
+
+    const successResult: RebaseResult = {
+      success: true,
+      newHead: result.newHead,
+      newBaseCommit: targetHead,
+    };
+
+    if (shouldCascade) {
+      successResult.cascadeResult = triggerCascade(db, repoPath, sourceStream, agentId, worktree);
+    }
+
+    return successResult;
+  }
+
+  // Conflict detected - record it
+  const conflictedFiles = result.conflicts ?? git.getConflictedFiles(gitOpts);
+  const conflictId = conflicts.createConflict(db, {
+    streamId: sourceStream,
+    conflictingCommit: git.getHead(gitOpts),
+    targetCommit: targetHead,
+    conflictedFiles,
+  });
+
+  // Set stream to conflicted
+  setStreamConflicted(db, sourceStream, conflictId);
+
+  // Abort the in-progress rebase - conflicts will be re-applied when resolved
+  try {
+    git.rebaseAbort(gitOpts);
+  } catch {
+    // Ignore abort errors
+  }
+
+  const conflictInfo: ConflictInfo[] = conflictedFiles.map((f) => ({ file: f }));
+
+  // If handler provided, indicate that async resolution is needed
+  // The caller should use rebaseOntoStreamAsync for proper async handling
+  if (conflictHandler) {
+    return {
+      success: false,
+      conflicts: conflictInfo,
+      conflictId,
+      pendingAsyncResolution: true,
+      error: 'Conflict detected - use rebaseOntoStreamAsync for async handler support',
+    };
+  }
+
+  return {
+    success: false,
+    conflicts: conflictInfo,
+    conflictId,
+    error: 'Conflict detected - awaiting resolution',
+  };
+}
+
+/**
+ * Handle agent-based conflict resolution during rebase (async version).
+ *
+ * This function properly awaits async conflict handlers with timeout support.
+ */
+async function handleAgentConflictResolutionAsync(
+  db: Database.Database,
+  repoPath: string,
+  source: Stream,
+  sourceStream: string,
+  targetHead: string,
+  sourceBranch: string,
+  commits: string[],
+  gitOpts: { cwd: string },
+  options: RebaseOntoStreamOptions,
+  shouldCascade: boolean,
+  agentId: string,
+  worktree: string
+): Promise<RebaseResult> {
   const { conflictHandler, conflictTimeout = DEFAULT_CONFLICT_TIMEOUT } = options;
 
   // Try the rebase
@@ -663,16 +918,16 @@ function handleAgentConflictResolution(
   // Set stream to conflicted
   setStreamConflicted(db, sourceStream, conflictId);
 
-  // If no handler, return with conflict info for deferred resolution
+  const conflictInfo: ConflictInfo[] = conflictedFiles.map((f) => ({ file: f }));
+
+  // If no handler, abort and return with conflict info for deferred resolution
   if (!conflictHandler) {
-    // Abort the in-progress rebase
     try {
       git.rebaseAbort(gitOpts);
     } catch {
       // Ignore abort errors
     }
 
-    const conflictInfo: ConflictInfo[] = conflictedFiles.map((f) => ({ file: f }));
     return {
       success: false,
       conflicts: conflictInfo,
@@ -681,68 +936,19 @@ function handleAgentConflictResolution(
     };
   }
 
-  // Handler provided - attempt resolution
+  // Handler provided - attempt async resolution
   conflicts.startConflictResolution(db, conflictId, agentId);
 
-  // Run handler synchronously (we're in a sync function but handler is async)
-  // We need to handle this carefully - run the async handler and wait
   let handlerResult = false;
   let handlerError: Error | null = null;
 
-  // Note: Since rebaseOntoStream is synchronous, but conflictHandler is async,
-  // we need to use a wrapper. In a real async context, this would be awaited.
-  // For now, we'll execute synchronously by using a blocking pattern.
-  const conflictInfo: ConflictInfo[] = conflictedFiles.map((f) => ({ file: f }));
-
   try {
-    // Create the timeout error
     const timeoutError = new ConflictResolutionError(conflictId, 'timeout');
-
-    // Execute handler with timeout (this requires async context)
-    // Since we're in sync code, we need to handle this differently.
-    // The handler returns a Promise<boolean>, so we need to resolve it.
-    const handlerPromise = conflictHandler(conflictInfo, worktree);
-    // Note: timeoutPromise would be used in async context
-    // withTimeout(handlerPromise, conflictTimeout, timeoutError);
-
-    // We can't await in sync code, so we'll use a sync wrapper pattern
-    // This is a limitation - in practice, rebaseOntoStream should be async
-    // For now, we'll make the entire operation return immediately if async handler is needed
-
-    // Actually, let's make this work by returning a "pending" state
-    // and requiring the caller to handle async resolution separately.
-    // But that breaks the API. Let's instead make this function async-compatible
-    // by documenting that when onConflict='agent', the result may be pending.
-
-    // For the MVP, let's execute synchronously with a simpler approach:
-    // Use Promise callbacks to handle the result
-    let resolved = false;
-
-    handlerPromise
-      .then((success) => {
-        handlerResult = success;
-        resolved = true;
-      })
-      .catch((err) => {
-        handlerError = err instanceof Error ? err : new Error(String(err));
-        resolved = true;
-      });
-
-    // Busy-wait for resolution (not ideal but works for sync API)
-    // In production, this should be refactored to async
-    const startTime = Date.now();
-    while (!resolved && Date.now() - startTime < conflictTimeout) {
-      // Use synchronous delay - Note: This blocks the event loop!
-      // This is a known limitation of trying to await in sync code
-      const endTime = Date.now() + 10;
-      while (Date.now() < endTime) {
-        // Spin
-      }
-    }
-
-    if (!resolved) {
-      handlerError = timeoutError;
-    }
+    handlerResult = await withTimeout(
+      conflictHandler(conflictInfo, worktree),
+      conflictTimeout,
+      timeoutError
+    );
   } catch (err) {
     handlerError = err instanceof Error ? err : new Error(String(err));
   }
@@ -757,7 +963,6 @@ function handleAgentConflictResolution(
     }
 
     conflicts.abandonConflict(db, conflictId);
-    // Clear conflicted status so stream can be used again
     clearStreamConflicted(db, sourceStream);
 
     return {
@@ -862,8 +1067,9 @@ export function rebaseOntoStream(
   const source = getStreamOrThrow(db, sourceStream);
   const target = getStreamOrThrow(db, targetStream);
 
-  // Block if source stream is conflicted (target can be rebased onto)
+  // Block if source stream is conflicted or paused (target can be rebased onto)
   assertStreamNotConflicted(source);
+  assertStreamNotPaused(source);
 
   const sourceBranch = `stream/${sourceStream}`;
   const targetBranch = `stream/${target.id}`;
@@ -1018,6 +1224,80 @@ export function rebaseOntoStream(
 }
 
 /**
+ * Async version of rebaseOntoStream that properly supports async conflict handlers.
+ *
+ * Use this when you need to provide an async conflictHandler that should be awaited.
+ * The sync version (rebaseOntoStream) will return immediately with pendingAsyncResolution=true
+ * when a conflictHandler is provided.
+ */
+export async function rebaseOntoStreamAsync(
+  db: Database.Database,
+  repoPath: string,
+  options: RebaseOntoStreamOptions
+): Promise<RebaseResult> {
+  const { sourceStream, targetStream, worktree, agentId } = options;
+  const onConflict = options.onConflict ?? 'abort';
+  const shouldCascade = options.cascade === true;
+
+  // Validate streams exist
+  const source = getStreamOrThrow(db, sourceStream);
+  const target = getStreamOrThrow(db, targetStream);
+
+  // Block if source stream is conflicted or paused
+  assertStreamNotConflicted(source);
+  assertStreamNotPaused(source);
+
+  const sourceBranch = `stream/${sourceStream}`;
+  const targetBranch = `stream/${target.id}`;
+  const gitOpts = { cwd: worktree };
+
+  // Get target's current head
+  const targetHead = git.resolveRef(targetBranch, gitOpts);
+
+  // Check if source has any commits beyond its base
+  const commits = git.getCommitRange(source.baseCommit, sourceBranch, gitOpts);
+  if (commits.length === 0) {
+    // No commits to rebase, just update baseCommit
+    updateBaseCommit(db, sourceStream, targetHead);
+    git.checkout(sourceBranch, gitOpts);
+    git.resetHard(targetHead, gitOpts);
+
+    const baseResult: RebaseResult = {
+      success: true,
+      newHead: targetHead,
+      newBaseCommit: targetHead,
+    };
+
+    if (shouldCascade) {
+      baseResult.cascadeResult = triggerCascade(db, repoPath, sourceStream, agentId, worktree);
+    }
+
+    return baseResult;
+  }
+
+  // Handle agent strategy with async support
+  if (onConflict === 'agent') {
+    return handleAgentConflictResolutionAsync(
+      db,
+      repoPath,
+      source,
+      sourceStream,
+      targetHead,
+      sourceBranch,
+      commits,
+      gitOpts,
+      options,
+      shouldCascade,
+      agentId,
+      worktree
+    );
+  }
+
+  // For other strategies, delegate to sync version
+  return rebaseOntoStream(db, repoPath, options);
+}
+
+/**
  * Continue a paused rebase after conflict resolution.
  *
  * Called when a stream is in 'conflicted' status and the user/agent
@@ -1106,7 +1386,27 @@ export function continueRebase(
     clearStreamConflicted(db, streamId);
 
     // Update baseCommit to the target we were rebasing onto
-    const targetCommit = conflict?.targetCommit;
+    // Handle the case where conflict record was deleted during resolution
+    let targetCommit = conflict?.targetCommit;
+    if (!targetCommit && conflictId) {
+      // Conflict record was deleted - try to get the target from git
+      // The rebase just completed, so we can infer from git state
+      // Fall back to using the current stream's parent head if available
+      const parentStreamId = stream.parentStream;
+      if (parentStreamId) {
+        try {
+          const parentBranch = `stream/${parentStreamId}`;
+          targetCommit = git.resolveRef(parentBranch, gitOpts);
+        } catch {
+          // Parent branch doesn't exist, leave baseCommit unchanged
+          console.warn(
+            `Warning: Could not determine target commit for stream ${streamId} - ` +
+            `conflict record ${conflictId} was deleted during resolution`
+          );
+        }
+      }
+    }
+
     if (targetCommit) {
       updateBaseCommit(db, streamId, targetCommit);
     }

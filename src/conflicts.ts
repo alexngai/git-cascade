@@ -142,13 +142,23 @@ export function updateConflictStatus(
 
 /**
  * Start conflict resolution (sets status to in_progress).
+ *
+ * Records which agent started the resolution for audit trail.
  */
 export function startConflictResolution(
   db: Database.Database,
   conflictId: string,
-  _agentId: string
+  agentId: string
 ): void {
-  updateConflictStatus(db, conflictId, 'in_progress');
+  const t = getTables(db);
+  const now = Date.now();
+
+  // Update status and record resolving agent for audit trail
+  db.prepare(`
+    UPDATE ${t.conflicts}
+    SET status = 'in_progress', resolution = json_set(COALESCE(resolution, '{}'), '$.resolvingAgent', ?, '$.resolutionStartedAt', ?)
+    WHERE id = ?
+  `).run(agentId, now, conflictId);
 }
 
 /**

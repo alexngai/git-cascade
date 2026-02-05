@@ -291,7 +291,7 @@ describe('Cross-Stream Operations', () => {
         agentId: 'agent-1',
       });
 
-      const graph = tracker.getStreamGraph(rootId);
+      const graph = tracker.getStreamHierarchy(rootId);
 
       // Should be a single node (not array)
       expect(Array.isArray(graph)).toBe(false);

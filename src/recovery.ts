@@ -287,14 +287,23 @@ export function healthCheck(
   const activeAgents = activeGuards.length;
 
   // Find stale locks (older than 5 minutes)
+  // Check if stream_locks table exists first (may not exist after certain migration paths)
   const staleLockThreshold = Date.now() - STALE_LOCK_THRESHOLD_MS;
-  const staleLocks = (
-    db.prepare(`SELECT COUNT(*) as count FROM ${t.stream_locks} WHERE acquired_at < ?`)
-      .get(staleLockThreshold) as { count: number }
-  ).count;
+  let staleLocks = 0;
+  const tableExists = (
+    db.prepare(`SELECT COUNT(*) as count FROM sqlite_master WHERE type='table' AND name=?`)
+      .get(t.stream_locks.replace(/^"|"$/g, '')) as { count: number }
+  ).count > 0;
 
-  if (staleLocks > 0) {
-    issues.push(`${staleLocks} stale lock(s) found (older than 5 minutes)`);
+  if (tableExists) {
+    staleLocks = (
+      db.prepare(`SELECT COUNT(*) as count FROM ${t.stream_locks} WHERE acquired_at < ?`)
+        .get(staleLockThreshold) as { count: number }
+    ).count;
+
+    if (staleLocks > 0) {
+      issues.push(`${staleLocks} stale lock(s) found (older than 5 minutes)`);
+    }
   }
 
   // Find incomplete operations
@@ -397,14 +406,22 @@ export function startupRecovery(
   // ─────────────────────────────────────────────────────────────────────────
   // Step 2: Release stale locks
   // ─────────────────────────────────────────────────────────────────────────
+  // Check if stream_locks table exists first (may not exist after certain migration paths)
   const staleLockThreshold = Date.now() - STALE_LOCK_THRESHOLD_MS;
-  const staleLocksResult = db
-    .prepare(`DELETE FROM ${t.stream_locks} WHERE acquired_at < ?`)
-    .run(staleLockThreshold);
+  const locksTableExists = (
+    db.prepare(`SELECT COUNT(*) as count FROM sqlite_master WHERE type='table' AND name=?`)
+      .get(t.stream_locks.replace(/^"|"$/g, '')) as { count: number }
+  ).count > 0;
 
-  releasedLocks = staleLocksResult.changes;
-  if (releasedLocks > 0) {
-    log.push(`Released ${releasedLocks} stale lock(s) (older than 5 minutes)`);
+  if (locksTableExists) {
+    const staleLocksResult = db
+      .prepare(`DELETE FROM ${t.stream_locks} WHERE acquired_at < ?`)
+      .run(staleLockThreshold);
+
+    releasedLocks = staleLocksResult.changes;
+    if (releasedLocks > 0) {
+      log.push(`Released ${releasedLocks} stale lock(s) (older than 5 minutes)`);
+    }
   }
 
   // ─────────────────────────────────────────────────────────────────────────

@@ -274,8 +274,8 @@ describe('E2E: Multi-Agent Workflow', () => {
       expect(fs.readFileSync(path.join(wt2, 'base.ts'), 'utf-8')).toContain('VERSION = 2');
       expect(fs.readFileSync(path.join(wt3, 'base.ts'), 'utf-8')).toContain('VERSION = 2');
 
-      // Stream graph should show hierarchy
-      const graph = tracker.getStreamGraph(baseStream);
+      // Stream hierarchy should show hierarchy
+      const graph = tracker.getStreamHierarchy(baseStream);
       expect(graph).toBeDefined();
       expect((graph as any).children.length).toBe(2);
     });
