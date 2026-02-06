@@ -14,6 +14,7 @@ import * as rollback from './rollback.js';
 import * as stacks from './stacks.js';
 import * as deps from './dependencies.js';
 import * as changes from './changes.js';
+import * as conflicts from './conflicts.js';
 import * as git from './git/index.js';
 import * as recovery from './recovery.js';
 import * as gc from './gc.js';
@@ -39,6 +40,8 @@ import type {
   RebaseOntoStreamOptions,
   RebaseResult,
   ConflictStrategy,
+  ConflictRecord,
+  CreateConflictOptions,
   StreamNode,
   Change,
   ChangeStatus,
@@ -371,6 +374,22 @@ export class MultiAgentRepoTracker {
 
   getDependents(streamId: string): string[] {
     return deps.getDependents(this.db, streamId);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Conflict Management
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  createConflict(options: CreateConflictOptions): string {
+    return conflicts.createConflict(this.db, options);
+  }
+
+  getConflict(conflictId: string): ConflictRecord | null {
+    return conflicts.getConflict(this.db, conflictId);
+  }
+
+  getConflictForStream(streamId: string): ConflictRecord | null {
+    return conflicts.getConflictForStream(this.db, streamId);
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
