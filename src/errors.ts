@@ -1,5 +1,5 @@
 /**
- * Custom error classes for the dataplane.
+ * Custom error classes for git-cascade.
  */
 
 /**

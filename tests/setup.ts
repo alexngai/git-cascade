@@ -13,7 +13,7 @@ import * as os from 'os';
 /**
  * Create a temporary directory for testing.
  */
-export function createTempDir(prefix = 'dataplane-test-'): string {
+export function createTempDir(prefix = 'git-cascade-test-'): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
@@ -32,9 +32,9 @@ export function initGitRepo(dir: string): void {
   execSync('git config user.email "test@example.com"', { cwd: dir, stdio: 'pipe' });
   execSync('git config user.name "Test User"', { cwd: dir, stdio: 'pipe' });
 
-  // Create .gitignore to exclude dataplane database files
+  // Create .gitignore to exclude git-cascade database files
   const gitignorePath = path.join(dir, '.gitignore');
-  fs.writeFileSync(gitignorePath, '.dataplane/\n');
+  fs.writeFileSync(gitignorePath, '.git-cascade/\n');
 
   // Create initial commit
   const readmePath = path.join(dir, 'README.md');
@@ -78,8 +78,8 @@ export function createTestRepo(): TestRepo {
   const dir = createTempDir();
   initGitRepo(dir);
 
-  // Create .dataplane directory for database
-  fs.mkdirSync(path.join(dir, '.dataplane'), { recursive: true });
+  // Create .git-cascade directory for database
+  fs.mkdirSync(path.join(dir, '.git-cascade'), { recursive: true });
 
   return {
     path: dir,

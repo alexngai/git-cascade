@@ -1,5 +1,5 @@
 {
-  "name": "dataplane",
+  "name": "git-cascade",
   "version": "0.1.3",
   "description": "Multi-agent git tracking system for coordinating AI agents on shared codebases",
   "type": "module",
@@ -34,7 +34,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/alexngai/dataplane.git"
+    "url": "git+https://github.com/alexngai/git-cascade.git"
   },
   "keywords": [
     "git",
@@ -46,9 +46,9 @@
   "author": "Alex Ngai",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/alexngai/dataplane/issues"
+    "url": "https://github.com/alexngai/git-cascade/issues"
   },
-  "homepage": "https://github.com/alexngai/dataplane#readme",
+  "homepage": "https://github.com/alexngai/git-cascade#readme",
   "engines": {
     "node": ">=18.0.0"
   },

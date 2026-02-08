@@ -1,5 +1,5 @@
 /**
- * Dataplane migration system tests.
+ * git-cascade migration system tests.
  *
  * Tests for the versioned migration system.
  */
@@ -10,20 +10,20 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import {
-  runDataplaneMigrations,
-  getCurrentDataplaneMigrationVersion,
-  getDataplaneMigrations,
-  getLatestDataplaneMigrationVersion,
-  rollbackDataplaneMigration,
+  runMigrations,
+  getCurrentMigrationVersion,
+  getMigrations,
+  getLatestMigrationVersion,
+  rollbackMigration,
 } from '../src/db/migrations.js';
 
-describe('Dataplane Migrations', () => {
+describe('git-cascade Migrations', () => {
   let db: Database.Database;
   let dbPath: string;
 
   beforeEach(() => {
     // Create a temporary database
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dataplane-migration-test-'));
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'git-cascade-migration-test-'));
     dbPath = path.join(tempDir, 'test.db');
     db = new Database(dbPath);
     db.pragma('foreign_keys = ON');
@@ -41,37 +41,37 @@ describe('Dataplane Migrations', () => {
     }
   });
 
-  describe('getCurrentDataplaneMigrationVersion', () => {
+  describe('getCurrentMigrationVersion', () => {
     it('should return 0 for a fresh database', () => {
-      const version = getCurrentDataplaneMigrationVersion(db);
+      const version = getCurrentMigrationVersion(db);
       expect(version).toBe(0);
     });
 
     it('should create the migrations table if it does not exist', () => {
-      getCurrentDataplaneMigrationVersion(db);
+      getCurrentMigrationVersion(db);
 
       const tables = db
-        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='dataplane_migrations'")
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='git_cascade_migrations'")
         .all() as Array<{ name: string }>;
 
       expect(tables.length).toBe(1);
     });
 
     it('should support table prefixes', () => {
-      const version = getCurrentDataplaneMigrationVersion(db, 'dp_');
+      const version = getCurrentMigrationVersion(db, 'dp_');
       expect(version).toBe(0);
 
       const tables = db
-        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='dp_dataplane_migrations'")
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='dp_git_cascade_migrations'")
         .all() as Array<{ name: string }>;
 
       expect(tables.length).toBe(1);
     });
   });
 
-  describe('getDataplaneMigrations', () => {
+  describe('getMigrations', () => {
     it('should return all available migrations', () => {
-      const migrations = getDataplaneMigrations();
+      const migrations = getMigrations();
       expect(migrations.length).toBeGreaterThanOrEqual(2);
       expect(migrations[0].version).toBe(1);
       expect(migrations[0].name).toBe('add-branch-point-commit');
@@ -80,22 +80,22 @@ describe('Dataplane Migrations', () => {
     });
 
     it('should return migrations in order', () => {
-      const migrations = getDataplaneMigrations();
+      const migrations = getMigrations();
       for (let i = 1; i < migrations.length; i++) {
         expect(migrations[i].version).toBeGreaterThan(migrations[i - 1].version);
       }
     });
   });
 
-  describe('getLatestDataplaneMigrationVersion', () => {
+  describe('getLatestMigrationVersion', () => {
     it('should return the highest version number', () => {
-      const migrations = getDataplaneMigrations();
-      const latest = getLatestDataplaneMigrationVersion();
+      const migrations = getMigrations();
+      const latest = getLatestMigrationVersion();
       expect(latest).toBe(Math.max(...migrations.map((m) => m.version)));
     });
   });
 
-  describe('runDataplaneMigrations', () => {
+  describe('runMigrations', () => {
     beforeEach(() => {
       // Create the base streams table that migrations depend on
       db.exec(`
@@ -119,15 +119,15 @@ describe('Dataplane Migrations', () => {
     });
 
     it('should run all pending migrations on a fresh database', () => {
-      const applied = runDataplaneMigrations(db);
+      const applied = runMigrations(db);
       expect(applied).toBeGreaterThanOrEqual(2);
 
-      const version = getCurrentDataplaneMigrationVersion(db);
-      expect(version).toBe(getLatestDataplaneMigrationVersion());
+      const version = getCurrentMigrationVersion(db);
+      expect(version).toBe(getLatestMigrationVersion());
     });
 
     it('should add branch_point_commit column via migration 1', () => {
-      runDataplaneMigrations(db);
+      runMigrations(db);
 
       const columns = db.pragma('table_info(streams)') as Array<{ name: string }>;
       const hasBranchPointCommit = columns.some((col) => col.name === 'branch_point_commit');
@@ -135,7 +135,7 @@ describe('Dataplane Migrations', () => {
     });
 
     it('should create stream_merges table via migration 2', () => {
-      runDataplaneMigrations(db);
+      runMigrations(db);
 
       const tables = db
         .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='stream_merges'")
@@ -145,7 +145,7 @@ describe('Dataplane Migrations', () => {
     });
 
     it('should create indexes for stream_merges table', () => {
-      runDataplaneMigrations(db);
+      runMigrations(db);
 
       const indexes = db
         .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE '%stream_merges%'")
@@ -156,8 +156,8 @@ describe('Dataplane Migrations', () => {
 
     it('should be idempotent', () => {
       // Run migrations twice
-      const first = runDataplaneMigrations(db);
-      const second = runDataplaneMigrations(db);
+      const first = runMigrations(db);
+      const second = runMigrations(db);
 
       expect(first).toBeGreaterThanOrEqual(2);
       expect(second).toBe(0); // No new migrations
@@ -184,7 +184,7 @@ describe('Dataplane Migrations', () => {
         );
       `);
 
-      const applied = runDataplaneMigrations(db, 'dp_');
+      const applied = runMigrations(db, 'dp_');
       expect(applied).toBeGreaterThanOrEqual(2);
 
       // Check prefixed tables and columns
@@ -198,15 +198,15 @@ describe('Dataplane Migrations', () => {
       expect(tables.length).toBe(1);
 
       // Check version is tracked in prefixed table
-      const version = getCurrentDataplaneMigrationVersion(db, 'dp_');
-      expect(version).toBe(getLatestDataplaneMigrationVersion());
+      const version = getCurrentMigrationVersion(db, 'dp_');
+      expect(version).toBe(getLatestMigrationVersion());
     });
 
     it('should record each migration in the migrations table', () => {
-      runDataplaneMigrations(db);
+      runMigrations(db);
 
       const migrations = db
-        .prepare('SELECT * FROM dataplane_migrations ORDER BY version')
+        .prepare('SELECT * FROM git_cascade_migrations ORDER BY version')
         .all() as Array<{ version: number; name: string; applied_at: number }>;
 
       expect(migrations.length).toBeGreaterThanOrEqual(2);
@@ -223,14 +223,14 @@ describe('Dataplane Migrations', () => {
 
     it('should skip migrations that have already been applied', () => {
       // Manually record migration 1 as applied
-      getCurrentDataplaneMigrationVersion(db); // Creates table
-      db.prepare('INSERT INTO dataplane_migrations (version, name, applied_at) VALUES (?, ?, ?)')
+      getCurrentMigrationVersion(db); // Creates table
+      db.prepare('INSERT INTO git_cascade_migrations (version, name, applied_at) VALUES (?, ?, ?)')
         .run(1, 'add-branch-point-commit', Date.now());
 
-      const applied = runDataplaneMigrations(db);
+      const applied = runMigrations(db);
 
       // Should only apply migration 2+
-      expect(applied).toBe(getLatestDataplaneMigrationVersion() - 1);
+      expect(applied).toBe(getLatestMigrationVersion() - 1);
 
       // Verify migration 2 was applied
       const tables = db
@@ -240,7 +240,7 @@ describe('Dataplane Migrations', () => {
     });
   });
 
-  describe('rollbackDataplaneMigration', () => {
+  describe('rollbackMigration', () => {
     beforeEach(() => {
       // Create base streams table
       db.exec(`
@@ -264,25 +264,25 @@ describe('Dataplane Migrations', () => {
     });
 
     it('should return false when no migrations to rollback', () => {
-      const result = rollbackDataplaneMigration(db);
+      const result = rollbackMigration(db);
       expect(result).toBe(false);
     });
 
     it('should rollback the last migration', () => {
       // Apply all migrations
-      runDataplaneMigrations(db);
-      const versionBefore = getCurrentDataplaneMigrationVersion(db);
+      runMigrations(db);
+      const versionBefore = getCurrentMigrationVersion(db);
 
       // Rollback
-      const result = rollbackDataplaneMigration(db);
+      const result = rollbackMigration(db);
       expect(result).toBe(true);
 
-      const versionAfter = getCurrentDataplaneMigrationVersion(db);
+      const versionAfter = getCurrentMigrationVersion(db);
       expect(versionAfter).toBe(versionBefore - 1);
     });
 
     it('should remove stream_merges table when rolling back migration 2', () => {
-      runDataplaneMigrations(db);
+      runMigrations(db);
 
       // Verify table exists
       let tables = db
@@ -291,13 +291,13 @@ describe('Dataplane Migrations', () => {
       expect(tables.length).toBe(1);
 
       // Rollback all migrations after migration 2 first
-      const latestVersion = getLatestDataplaneMigrationVersion();
+      const latestVersion = getLatestMigrationVersion();
       for (let i = latestVersion; i > 2; i--) {
-        rollbackDataplaneMigration(db);
+        rollbackMigration(db);
       }
 
       // Now rollback migration 2
-      rollbackDataplaneMigration(db);
+      rollbackMigration(db);
 
       // Verify table is dropped
       tables = db
@@ -331,12 +331,12 @@ describe('Dataplane Migrations', () => {
       `);
 
       // Migration should be idempotent
-      expect(() => runDataplaneMigrations(db)).not.toThrow();
+      expect(() => runMigrations(db)).not.toThrow();
     });
 
     it('should not fail if streams table does not exist', () => {
       // Don't create streams table
-      expect(() => runDataplaneMigrations(db)).not.toThrow();
+      expect(() => runMigrations(db)).not.toThrow();
     });
   });
 
@@ -377,11 +377,11 @@ describe('Dataplane Migrations', () => {
       `);
 
       // Migration should be idempotent
-      expect(() => runDataplaneMigrations(db)).not.toThrow();
+      expect(() => runMigrations(db)).not.toThrow();
     });
 
     it('should create correct schema for stream_merges', () => {
-      runDataplaneMigrations(db);
+      runMigrations(db);
 
       const columns = db.pragma('table_info(stream_merges)') as Array<{ name: string; type: string; notnull: number }>;
       const columnMap = new Map(columns.map((c) => [c.name, c]));
@@ -423,7 +423,7 @@ describe('Dataplane Migrations', () => {
     });
 
     it('should create checkpoints table with correct schema', () => {
-      runDataplaneMigrations(db);
+      runMigrations(db);
 
       const columns = db.pragma('table_info(checkpoints)') as Array<{ name: string; type: string; notnull: number }>;
       const columnMap = new Map(columns.map((c) => [c.name, c]));
@@ -445,7 +445,7 @@ describe('Dataplane Migrations', () => {
     });
 
     it('should create diff_stacks table with correct schema', () => {
-      runDataplaneMigrations(db);
+      runMigrations(db);
 
       const columns = db.pragma('table_info(diff_stacks)') as Array<{ name: string; type: string; notnull: number }>;
       const columnMap = new Map(columns.map((c) => [c.name, c]));
@@ -469,7 +469,7 @@ describe('Dataplane Migrations', () => {
     });
 
     it('should create diff_stack_entries table with correct schema', () => {
-      runDataplaneMigrations(db);
+      runMigrations(db);
 
       const columns = db.pragma('table_info(diff_stack_entries)') as Array<{ name: string; type: string; notnull: number }>;
       const columnMap = new Map(columns.map((c) => [c.name, c]));
@@ -486,7 +486,7 @@ describe('Dataplane Migrations', () => {
     });
 
     it('should create indexes for checkpoints table', () => {
-      runDataplaneMigrations(db);
+      runMigrations(db);
 
       const indexes = db
         .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='checkpoints'")
@@ -498,7 +498,7 @@ describe('Dataplane Migrations', () => {
     });
 
     it('should create indexes for diff_stacks table', () => {
-      runDataplaneMigrations(db);
+      runMigrations(db);
 
       const indexes = db
         .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='diff_stacks'")
@@ -510,7 +510,7 @@ describe('Dataplane Migrations', () => {
     });
 
     it('should create indexes for diff_stack_entries table', () => {
-      runDataplaneMigrations(db);
+      runMigrations(db);
 
       const indexes = db
         .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='diff_stack_entries'")
@@ -559,11 +559,11 @@ describe('Dataplane Migrations', () => {
       `);
 
       // Migration should be idempotent - should not throw
-      expect(() => runDataplaneMigrations(db)).not.toThrow();
+      expect(() => runMigrations(db)).not.toThrow();
     });
 
     it('should enforce unique constraint on checkpoints (stream_id, commit_sha)', () => {
-      runDataplaneMigrations(db);
+      runMigrations(db);
 
       // Insert a stream first
       db.exec(`
@@ -587,7 +587,7 @@ describe('Dataplane Migrations', () => {
     });
 
     it('should enforce unique constraint on diff_stack_entries (stack_id, checkpoint_id)', () => {
-      runDataplaneMigrations(db);
+      runMigrations(db);
 
       // Insert prerequisite data
       db.exec(`
@@ -619,7 +619,7 @@ describe('Dataplane Migrations', () => {
     });
 
     it('should rollback and remove all three tables', () => {
-      runDataplaneMigrations(db);
+      runMigrations(db);
 
       // Verify tables exist
       let tables = db
@@ -628,8 +628,8 @@ describe('Dataplane Migrations', () => {
       expect(tables.length).toBe(3);
 
       // Rollback migration 4 (worker_tasks) first, then migration 3
-      rollbackDataplaneMigration(db); // Rolls back migration 4
-      rollbackDataplaneMigration(db); // Rolls back migration 3
+      rollbackMigration(db); // Rolls back migration 4
+      rollbackMigration(db); // Rolls back migration 3
 
       // Verify tables are dropped
       tables = db

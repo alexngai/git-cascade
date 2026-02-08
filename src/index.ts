@@ -1,5 +1,5 @@
 /**
- * Dataplane - Multi-agent git tracking system.
+ * git-cascade - Multi-agent git tracking system.
  *
  * Coordination layer for multiple AI agents working concurrently
  * on a shared codebase.

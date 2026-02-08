@@ -177,8 +177,8 @@ export interface TrackExistingBranchOptions {
  * which tracks an existing branch without creating a new `stream/<id>` branch.
  *
  * Use this when:
- * - You have an existing branch you want to track in the dataplane
- * - You want to use dataplane's conflict tracking on existing branches
+ * - You have an existing branch you want to track in git-cascade
+ * - You want to use git-cascade's conflict tracking on existing branches
  * - You're integrating with existing git workflows
  *
  * @example

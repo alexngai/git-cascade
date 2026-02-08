@@ -1,5 +1,5 @@
 /**
- * Database migration utilities for dataplane.
+ * Database migration utilities for git-cascade.
  *
  * Follows the same pattern as sudocode's migration system for consistency.
  * Migrations are tracked separately with prefix support.
@@ -7,7 +7,7 @@
 
 import type Database from "better-sqlite3";
 
-export interface DataplaneMigration {
+export interface GitCascadeMigration {
   version: number;
   name: string;
   up: (db: Database.Database, prefix: string) => void;
@@ -15,12 +15,12 @@ export interface DataplaneMigration {
 }
 
 /**
- * All dataplane migrations in order.
+ * All git-cascade migrations in order.
  *
  * Note: The base schema is created by initializeSchema() in database.ts.
  * These migrations handle schema changes after initial setup.
  */
-const MIGRATIONS: DataplaneMigration[] = [
+const MIGRATIONS: GitCascadeMigration[] = [
   {
     version: 1,
     name: "add-branch-point-commit",
@@ -316,13 +316,13 @@ const MIGRATIONS: DataplaneMigration[] = [
  * Get migration table name with prefix.
  */
 function getMigrationTableName(prefix: string): string {
-  return `${prefix}dataplane_migrations`;
+  return `${prefix}git_cascade_migrations`;
 }
 
 /**
  * Get the current migration version from the database.
  */
-export function getCurrentDataplaneMigrationVersion(
+export function getCurrentMigrationVersion(
   db: Database.Database,
   prefix: string = ""
 ): number {
@@ -345,9 +345,9 @@ export function getCurrentDataplaneMigrationVersion(
 /**
  * Record a migration as applied.
  */
-export function recordDataplaneMigration(
+export function recordMigration(
   db: Database.Database,
-  migration: DataplaneMigration,
+  migration: GitCascadeMigration,
   prefix: string = ""
 ): void {
   const tableName = getMigrationTableName(prefix);
@@ -359,17 +359,17 @@ export function recordDataplaneMigration(
 }
 
 /**
- * Run all pending dataplane migrations.
+ * Run all pending git-cascade migrations.
  *
  * @param db - Database connection
  * @param prefix - Table name prefix (e.g., 'dp_' when sharing sudocode's database)
  * @returns Number of migrations applied
  */
-export function runDataplaneMigrations(
+export function runMigrations(
   db: Database.Database,
   prefix: string = ""
 ): number {
-  const currentVersion = getCurrentDataplaneMigrationVersion(db, prefix);
+  const currentVersion = getCurrentMigrationVersion(db, prefix);
 
   const pendingMigrations = MIGRATIONS.filter(
     (m) => m.version > currentVersion
@@ -380,22 +380,22 @@ export function runDataplaneMigrations(
   }
 
   console.log(
-    `Running ${pendingMigrations.length} pending dataplane migration(s)...`
+    `Running ${pendingMigrations.length} pending git-cascade migration(s)...`
   );
 
   for (const migration of pendingMigrations) {
     console.log(
-      `  Applying dataplane migration ${migration.version}: ${migration.name}`
+      `  Applying git-cascade migration ${migration.version}: ${migration.name}`
     );
     try {
       migration.up(db, prefix);
-      recordDataplaneMigration(db, migration, prefix);
+      recordMigration(db, migration, prefix);
       console.log(
-        `  ✓ Dataplane migration ${migration.version} applied successfully`
+        `  ✓ git-cascade migration ${migration.version} applied successfully`
       );
     } catch (error) {
       console.error(
-        `  ✗ Dataplane migration ${migration.version} failed:`,
+        `  ✗ git-cascade migration ${migration.version} failed:`,
         error
       );
       throw error;
@@ -412,11 +412,11 @@ export function runDataplaneMigrations(
  * @param prefix - Table name prefix
  * @returns true if a migration was rolled back, false if none to rollback
  */
-export function rollbackDataplaneMigration(
+export function rollbackMigration(
   db: Database.Database,
   prefix: string = ""
 ): boolean {
-  const currentVersion = getCurrentDataplaneMigrationVersion(db, prefix);
+  const currentVersion = getCurrentMigrationVersion(db, prefix);
 
   if (currentVersion === 0) {
     console.log("No migrations to rollback");
@@ -435,7 +435,7 @@ export function rollbackDataplaneMigration(
   }
 
   console.log(
-    `Rolling back dataplane migration ${migration.version}: ${migration.name}`
+    `Rolling back git-cascade migration ${migration.version}: ${migration.name}`
   );
 
   try {
@@ -447,12 +447,12 @@ export function rollbackDataplaneMigration(
     );
 
     console.log(
-      `  ✓ Dataplane migration ${migration.version} rolled back successfully`
+      `  ✓ git-cascade migration ${migration.version} rolled back successfully`
     );
     return true;
   } catch (error) {
     console.error(
-      `  ✗ Rollback of dataplane migration ${migration.version} failed:`,
+      `  ✗ Rollback of git-cascade migration ${migration.version} failed:`,
       error
     );
     throw error;
@@ -462,15 +462,31 @@ export function rollbackDataplaneMigration(
 /**
  * Get all available migrations.
  */
-export function getDataplaneMigrations(): readonly DataplaneMigration[] {
+export function getMigrations(): readonly GitCascadeMigration[] {
   return MIGRATIONS;
 }
 
 /**
  * Get the latest migration version available.
  */
-export function getLatestDataplaneMigrationVersion(): number {
+export function getLatestMigrationVersion(): number {
   return MIGRATIONS.length > 0
     ? Math.max(...MIGRATIONS.map((m) => m.version))
     : 0;
 }
+
+// Legacy aliases for backward compatibility
+/** @deprecated Use GitCascadeMigration instead */
+export type DataplaneMigration = GitCascadeMigration;
+/** @deprecated Use getCurrentMigrationVersion instead */
+export const getCurrentDataplaneMigrationVersion = getCurrentMigrationVersion;
+/** @deprecated Use recordMigration instead */
+export const recordDataplaneMigration = recordMigration;
+/** @deprecated Use runMigrations instead */
+export const runDataplaneMigrations = runMigrations;
+/** @deprecated Use rollbackMigration instead */
+export const rollbackDataplaneMigration = rollbackMigration;
+/** @deprecated Use getMigrations instead */
+export const getDataplaneMigrations = getMigrations;
+/** @deprecated Use getLatestMigrationVersion instead */
+export const getLatestDataplaneMigrationVersion = getLatestMigrationVersion;

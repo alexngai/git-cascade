@@ -45,7 +45,7 @@ describe('Reconciliation', () => {
         agentId: 'agent-1',
       });
 
-      // Make an external commit directly to the branch (bypassing dataplane)
+      // Make an external commit directly to the branch (bypassing git-cascade)
       const branchName = `stream/${streamId}`;
       git.checkout(branchName, { cwd: testRepo.path });
       fs.writeFileSync(path.join(testRepo.path, 'external.txt'), 'external change');
