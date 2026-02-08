@@ -1,6 +1,6 @@
-# CLAUDE.md - Dataplane Codebase Guide
+# CLAUDE.md - git-cascade Codebase Guide
 
-## What is Dataplane?
+## What is git-cascade?
 
 A coordination layer for multiple AI agents working concurrently on a shared git repository. It provides database-backed tracking of streams (branches), operations (audit trail), and changes (stable identity across rebases).
 

@@ -1,5 +1,5 @@
 /**
- * Diff Stack operations for the dataplane.
+ * Diff Stack operations for git-cascade.
  *
  * Diff Stacks are reviewable/mergeable units that group one or more checkpoints.
  * Part of the unified checkpoint/diff stack architecture (s-366r).

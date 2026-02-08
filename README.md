@@ -1,4 +1,4 @@
-# Dataplane
+# git-cascade
 
 A coordination layer for multiple AI agents working concurrently on a shared git repository.
 
@@ -16,13 +16,13 @@ A coordination layer for multiple AI agents working concurrently on a shared git
 ## Installation
 
 ```bash
-npm install dataplane
+npm install git-cascade
 ```
 
 ## Quick Start
 
 ```typescript
-import { MultiAgentRepoTracker } from 'dataplane';
+import { MultiAgentRepoTracker } from 'git-cascade';
 
 // Initialize tracker
 const tracker = new MultiAgentRepoTracker({
@@ -126,7 +126,7 @@ const result = tracker.syncWithParent(streamId, agentId, worktree, 'ours');
 Changes propagate automatically to dependent streams:
 
 ```typescript
-import * as cascade from 'dataplane/cascade';
+import * as cascade from 'git-cascade/cascade';
 
 cascade.cascadeRebase(db, repoPath, {
   rootStream: parentId,
@@ -158,12 +158,12 @@ cascade.cascadeRebase(db, repoPath, {
 ### Low-Level APIs
 
 ```typescript
-import * as streams from 'dataplane/streams';
-import * as changes from 'dataplane/changes';
-import * as conflicts from 'dataplane/conflicts';
-import * as cascade from 'dataplane/cascade';
-import * as gc from 'dataplane/gc';
-import * as recovery from 'dataplane/recovery';
+import * as streams from 'git-cascade/streams';
+import * as changes from 'git-cascade/changes';
+import * as conflicts from 'git-cascade/conflicts';
+import * as cascade from 'git-cascade/cascade';
+import * as gc from 'git-cascade/gc';
+import * as recovery from 'git-cascade/recovery';
 ```
 
 ## Configuration
@@ -171,7 +171,7 @@ import * as recovery from 'dataplane/recovery';
 ### Garbage Collection
 
 ```typescript
-import * as gc from 'dataplane/gc';
+import * as gc from 'git-cascade/gc';
 
 gc.setGCConfig(db, {
   autoArchiveOnMerge: true,
@@ -187,7 +187,7 @@ gc.setGCConfig(db, {
 ```typescript
 const tracker = new MultiAgentRepoTracker({
   repoPath: '/path/to/repo',
-  dbPath: '/path/to/tracker.db',  // Default: .dataplane/tracker.db
+  dbPath: '/path/to/tracker.db',  // Default: .git-cascade/tracker.db
   tablePrefix: 'myapp_',          // Optional table prefix
   skipRecovery: false,            // Run recovery on startup
 });

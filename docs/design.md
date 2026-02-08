@@ -694,7 +694,7 @@ The external coordinator is responsible for:
 3. Detecting crashed agents and releasing their locks
 4. Notifying agents when their stream's parent changes
 
-This dataplane provides defensive checks but trusts the coordinator for correctness.
+This git-cascade provides defensive checks but trusts the coordinator for correctness.
 
 ---
 

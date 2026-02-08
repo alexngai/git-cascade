@@ -49,7 +49,7 @@ describe('Existing Database Integration', () => {
       .get() as { value: string };
     expect(row.value).toBe('test-data');
 
-    // Verify dataplane tables were created without prefix
+    // Verify git-cascade tables were created without prefix
     const tables = existingDb
       .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
       .all() as { name: string }[];
@@ -74,7 +74,7 @@ describe('Existing Database Integration', () => {
     const tracker = new MultiAgentRepoTracker({
       repoPath: testRepo.path,
       db: existingDb,
-      tablePrefix: 'dataplane_',
+      tablePrefix: 'gc_',
     });
 
     // Create a stream
@@ -88,15 +88,15 @@ describe('Existing Database Integration', () => {
     expect(stream).not.toBeNull();
     expect(stream!.name).toBe('prefixed-stream');
 
-    // Verify dataplane tables were created WITH prefix
+    // Verify git-cascade tables were created WITH prefix
     const tables = existingDb
       .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
       .all() as { name: string }[];
 
     const tableNames = tables.map(t => t.name);
-    expect(tableNames).toContain('dataplane_streams');
-    expect(tableNames).toContain('dataplane_operations');
-    expect(tableNames).toContain('dataplane_agent_worktrees');
+    expect(tableNames).toContain('gc_streams');
+    expect(tableNames).toContain('gc_operations');
+    expect(tableNames).toContain('gc_agent_worktrees');
     expect(tableNames).toContain('my_app_data');
 
     // Should NOT have unprefixed tables

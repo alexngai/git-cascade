@@ -5,7 +5,7 @@
  */
 
 import Database from 'better-sqlite3';
-import { runDataplaneMigrations } from './migrations.js';
+import { runMigrations } from './migrations.js';
 
 export interface DatabaseOptions {
   /** Path to SQLite database file (ignored if db is provided) */
@@ -329,7 +329,7 @@ function initializeSchema(db: Database.Database, prefix: string): void {
   `);
 
   // Run versioned migrations for existing databases
-  runDataplaneMigrations(db, prefix);
+  runMigrations(db, prefix);
 }
 
 /**

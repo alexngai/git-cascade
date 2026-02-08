@@ -1,7 +1,7 @@
 /**
  * Reconciliation logic for detecting and handling external git changes.
  *
- * When agents operate outside of dataplane's control, the git state can
+ * When agents operate outside of git-cascade's control, the git state can
  * diverge from what's tracked in the database. This module provides APIs
  * to detect and reconcile such differences.
  */

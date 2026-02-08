@@ -1,5 +1,5 @@
 /**
- * MultiAgentRepoTracker - Main entry point for the dataplane.
+ * MultiAgentRepoTracker - Main entry point for git-cascade.
  *
  * Coordinates multiple AI agents working on a shared git repository.
  */
@@ -107,7 +107,7 @@ export class MultiAgentRepoTracker {
       createDatabase({ db: options.db, tablePrefix: prefix });
     } else {
       // Create new database
-      const dbPath = options.dbPath ?? `${options.repoPath}/.dataplane/tracker.db`;
+      const dbPath = options.dbPath ?? `${options.repoPath}/.git-cascade/tracker.db`;
       this.db = createDatabase({ path: dbPath, tablePrefix: prefix, verbose: options.verbose });
       this.ownsDb = true;
     }

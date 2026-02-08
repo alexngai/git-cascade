@@ -1,8 +1,8 @@
-# Dataplane: Multi-Agent Git Coordination System
+# git-cascade: Multi-Agent Git Coordination System
 
 ## Overview
 
-Dataplane is a coordination layer for multiple AI agents working concurrently on a shared git repository. It provides:
+git-cascade is a coordination layer for multiple AI agents working concurrently on a shared git repository. It provides:
 
 - **Stream-based workflows** - Logical work units that map 1:1 to git branches
 - **Stable identity tracking** - Change IDs that survive rebases
@@ -187,7 +187,7 @@ Worktrees provide filesystem isolation so agents can work concurrently without s
 
 ### Optimistic Concurrency
 
-Instead of locks, dataplane uses **guards** for conflict detection:
+Instead of locks, git-cascade uses **guards** for conflict detection:
 
 ```typescript
 // Read current state
@@ -226,7 +226,7 @@ The main coordination class:
 ```typescript
 const tracker = new MultiAgentRepoTracker({
   repoPath: '/path/to/repo',
-  dbPath: '/path/to/tracker.db',  // Optional, defaults to .dataplane/tracker.db
+  dbPath: '/path/to/tracker.db',  // Optional, defaults to .git-cascade/tracker.db
   skipRecovery: false,            // Run startup recovery
 });
 
@@ -274,14 +274,14 @@ tracker.close();
 For advanced use cases, low-level modules are exposed:
 
 ```typescript
-import * as streams from 'dataplane/streams';
-import * as changes from 'dataplane/changes';
-import * as conflicts from 'dataplane/conflicts';
-import * as cascade from 'dataplane/cascade';
-import * as gc from 'dataplane/gc';
-import * as recovery from 'dataplane/recovery';
-import * as guards from 'dataplane/guards';
-import * as snapshots from 'dataplane/snapshots';
+import * as streams from 'git-cascade/streams';
+import * as changes from 'git-cascade/changes';
+import * as conflicts from 'git-cascade/conflicts';
+import * as cascade from 'git-cascade/cascade';
+import * as gc from 'git-cascade/gc';
+import * as recovery from 'git-cascade/recovery';
+import * as guards from 'git-cascade/guards';
+import * as snapshots from 'git-cascade/snapshots';
 ```
 
 ## Database Schema
@@ -355,7 +355,7 @@ import {
   ConcurrentModificationError, // Guard violation
   BranchNotFoundError,
   WorktreeError,
-} from 'dataplane';
+} from 'git-cascade';
 ```
 
 ## Test Coverage
@@ -376,7 +376,7 @@ import {
 ## Usage Example
 
 ```typescript
-import { MultiAgentRepoTracker } from 'dataplane';
+import { MultiAgentRepoTracker } from 'git-cascade';
 
 // Initialize tracker
 const tracker = new MultiAgentRepoTracker({

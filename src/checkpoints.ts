@@ -1,5 +1,5 @@
 /**
- * Checkpoint operations for the dataplane.
+ * Checkpoint operations for git-cascade.
  *
  * Checkpoints are snapshots of individual commits with minimal state.
  * Part of the unified checkpoint/diff stack architecture (s-366r).
