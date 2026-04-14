@@ -59,5 +59,8 @@ export * as diffStacks from './diff-stacks.js';
 // Worker Tasks (low-level API)
 export * as workerTasks from './worker-tasks.js';
 
+// Event hooks (method names, payload types, emitter signature)
+export * from './events/index.js';
+
 // Errors
 export * from './errors.js';

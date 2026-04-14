@@ -12,6 +12,7 @@ A coordination layer for multiple AI agents working concurrently on a shared git
 - **Stacked Review** - Optional PR-like reviewable units for incremental code review workflows
 - **Full Audit Trail** - Operation logging enables rollback and crash recovery
 - **Optimistic Concurrency** - Guards detect concurrent modifications without blocking
+- **Event Emission (opt-in)** - Emit MAP-compatible events (`x-cascade/stream.*`) for streams opened, commits recorded, merges completed, conflicts detected, and streams abandoned. Configurable prefix; transport-agnostic (no MAP dependency).
 
 ## Installation
 
@@ -139,6 +140,55 @@ cascade.cascadeRebase(db, repoPath, {
 });
 ```
 
+### Event Emission (MAP-compatible)
+
+git-cascade can emit structured events after each operation. Events are opt-in via an `emit` callback — when omitted, there is no runtime cost beyond a single null check per operation. git-cascade has no transport dependency; the callback decides how to forward events (log, event bus, JSON-RPC, etc.).
+
+Default method names follow the [MAP](https://github.com/modelcontextprotocol/specification) vendor-extension convention (`x-cascade/stream.opened`, `x-cascade/stream.committed`, etc.), so runtimes embedding git-cascade alongside a MAP connection can forward events verbatim as MAP notifications — no translation layer needed.
+
+```typescript
+import {
+  MultiAgentRepoTracker,
+  CASCADE_METHOD_SUFFIXES,
+  matchCascadeSuffix,
+} from 'git-cascade';
+
+const tracker = new MultiAgentRepoTracker({
+  repoPath: '/path/to/repo',
+  // Forward events to a MAP client as notifications
+  emit: (method, params) => mapClient.notify(method, params),
+});
+
+// Emitted events (default prefix):
+//   x-cascade/stream.opened       — createStream / forkStream / trackExistingBranch
+//   x-cascade/stream.committed    — commitChanges
+//   x-cascade/stream.merged       — mergeStream / completeTask
+//   x-cascade/stream.conflicted   — conflict recorded (rebase/sync/merge/task-complete)
+//   x-cascade/stream.abandoned    — abandonStream
+```
+
+**Configurable prefix.** Override the `x-cascade` prefix for branded deployments or namespace isolation. Only the prefix varies; suffixes are fixed.
+
+```typescript
+const tracker = new MultiAgentRepoTracker({
+  repoPath: '/path/to/repo',
+  emit: (method, params) => myEventBus.publish(method, params),
+  eventPrefix: 'x-acme-cascade',  // → emits 'x-acme-cascade/stream.opened', etc.
+});
+
+// Narrow on the suffix to stay prefix-agnostic:
+emit: (method, params) => {
+  const suffix = matchCascadeSuffix(method);
+  if (suffix === CASCADE_METHOD_SUFFIXES.STREAM_COMMITTED) {
+    // ... params is StreamCommittedParams
+  }
+}
+```
+
+Events fire synchronously after the corresponding database write, in operation order. Exceptions thrown by the callback are caught and discarded — a misbehaving observer cannot break cascade operations.
+
+See [`src/events/index.ts`](./src/events/index.ts) for full method names, payload types, and narrowing helpers.
+
 ## API Overview
 
 ### MultiAgentRepoTracker
@@ -166,6 +216,31 @@ import * as gc from 'git-cascade/gc';
 import * as recovery from 'git-cascade/recovery';
 ```
 
+### Event Schema
+
+```typescript
+import {
+  // Default-prefixed method names (for default eventPrefix)
+  CASCADE_METHODS,
+  // Canonical suffixes (prefix-agnostic, always stable)
+  CASCADE_METHOD_SUFFIXES,
+  DEFAULT_CASCADE_PREFIX,
+  // Build a method map with a custom prefix
+  buildCascadeMethods,
+  // Extract the canonical suffix from any method string
+  matchCascadeSuffix,
+  // Types
+  type CascadeEmitter,
+  type CascadeMethodSuffix,
+  type CascadeSuffixMap,
+  type StreamOpenedParams,
+  type StreamCommittedParams,
+  type StreamMergedParams,
+  type StreamConflictedParams,
+  type StreamAbandonedParams,
+} from 'git-cascade';
+```
+
 ## Configuration
 
 ### Garbage Collection
@@ -190,6 +265,8 @@ const tracker = new MultiAgentRepoTracker({
   dbPath: '/path/to/tracker.db',  // Default: .git-cascade/tracker.db
   tablePrefix: 'myapp_',          // Optional table prefix
   skipRecovery: false,            // Run recovery on startup
+  emit: (method, params) => {},   // Optional event callback (see Event Emission)
+  eventPrefix: 'x-cascade',       // Optional; default 'x-cascade'
 });
 ```
 
@@ -207,7 +284,7 @@ npm install
 # Build
 npm run build
 
-# Run tests (447 tests)
+# Run tests (750 tests)
 npm test
 
 # Type check

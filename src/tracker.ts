@@ -69,6 +69,14 @@ import type {
   CherryPickStackResult,
 } from './diff-stacks.js';
 import { StreamConflictedError } from './errors.js';
+import {
+  CASCADE_METHOD_SUFFIXES,
+  DEFAULT_CASCADE_PREFIX,
+  type CascadeEmitter,
+  type CascadeMethodSuffix,
+  type CascadeSuffixMap,
+} from './events/index.js';
+import { TaskConflictError } from './worker-tasks.js';
 
 export interface TrackerOptions {
   /** Path to the git repository */
@@ -83,6 +91,30 @@ export interface TrackerOptions {
   verbose?: boolean;
   /** Skip startup recovery (default: false, respects runRecoveryOnStartup config) */
   skipRecovery?: boolean;
+  /**
+   * Optional event hook invoked synchronously after successful operations.
+   *
+   * See `./events/index.js` for method names, payload shapes, and the
+   * MAP-compatibility rationale. Callbacks are wrapped in try/catch — a
+   * thrown emit will not propagate. Implementations should be fire-and-forget;
+   * expensive synchronous work in the callback will slow cascade operations.
+   */
+  emit?: CascadeEmitter;
+  /**
+   * Prefix applied to every emitted method name. Defaults to `x-cascade`
+   * (MAP vendor-extension convention). Override for branded deployments,
+   * namespace isolation in testing, or environments that require a
+   * different prefix.
+   *
+   * Only the prefix varies — suffixes (`stream.opened`, `stream.committed`,
+   * ...) are fixed. A trailing slash on the prefix is not required and
+   * will not be stripped.
+   *
+   * @example
+   *   new MultiAgentRepoTracker({ ..., eventPrefix: 'x-acme-cascade' });
+   *   // emits 'x-acme-cascade/stream.opened', etc.
+   */
+  eventPrefix?: string;
 }
 
 /**
@@ -93,9 +125,13 @@ export class MultiAgentRepoTracker {
   readonly db: Database.Database;
   readonly tables: TableNames;
   private readonly ownsDb: boolean;
+  private readonly emitter: CascadeEmitter | null;
+  private readonly eventPrefix: string;
 
   constructor(options: TrackerOptions) {
     this.repoPath = options.repoPath;
+    this.emitter = options.emit ?? null;
+    this.eventPrefix = options.eventPrefix ?? DEFAULT_CASCADE_PREFIX;
     const prefix = options.tablePrefix ?? '';
     this.tables = getTableNames(prefix);
 
@@ -126,6 +162,28 @@ export class MultiAgentRepoTracker {
   }
 
   /**
+   * Safely invoke the emit callback. Never throws; never propagates.
+   *
+   * Composes the configured prefix with the given suffix to produce the full
+   * method name (e.g., `x-cascade/stream.opened`). No-op when no emitter was
+   * supplied at construction time, so the cost of unused emits is a single
+   * null check per operation.
+   */
+  private emit<S extends CascadeMethodSuffix>(
+    suffix: S,
+    params: CascadeSuffixMap[S]
+  ): void {
+    if (!this.emitter) return;
+    const method = `${this.eventPrefix}/${suffix}`;
+    try {
+      this.emitter(method, params);
+    } catch {
+      // Emit failures are observability concerns, not cascade concerns.
+      // Swallow so a misbehaving callback cannot break tracker operations.
+    }
+  }
+
+  /**
    * Close the tracker and release resources.
    * Only closes the database if we created it (not if using existing DB).
    */
@@ -140,7 +198,21 @@ export class MultiAgentRepoTracker {
   // ─────────────────────────────────────────────────────────────────────────────
 
   createStream(options: CreateStreamOptions): string {
-    return streams.createStream(this.db, this.repoPath, options);
+    const streamId = streams.createStream(this.db, this.repoPath, options);
+    const stream = streams.getStream(this.db, streamId);
+    if (stream) {
+      this.emit(CASCADE_METHOD_SUFFIXES.STREAM_OPENED, {
+        stream_id: stream.id,
+        name: stream.name,
+        agent_id: stream.agentId,
+        base_commit: stream.baseCommit,
+        parent_stream: stream.parentStream ?? undefined,
+        branch_name: streams.getStreamBranchName(this.db, stream.id),
+        is_local_mode: stream.isLocalMode,
+        metadata: stream.metadata,
+      });
+    }
+    return streamId;
   }
 
   getStream(streamId: string): Stream | null {
@@ -156,14 +228,57 @@ export class MultiAgentRepoTracker {
 
   abandonStream(streamId: string, options?: { reason?: string; cascade?: boolean }): void {
     streams.abandonStream(this.db, streamId, options);
+    this.emit(CASCADE_METHOD_SUFFIXES.STREAM_ABANDONED, {
+      stream_id: streamId,
+      reason: options?.reason,
+      cascade: options?.cascade,
+    });
   }
 
   forkStream(options: ForkStreamOptions): string {
-    return streams.forkStream(this.db, this.repoPath, options);
+    const streamId = streams.forkStream(this.db, this.repoPath, options);
+    const stream = streams.getStream(this.db, streamId);
+    if (stream) {
+      this.emit(CASCADE_METHOD_SUFFIXES.STREAM_OPENED, {
+        stream_id: stream.id,
+        name: stream.name,
+        agent_id: stream.agentId,
+        base_commit: stream.baseCommit,
+        parent_stream: stream.parentStream ?? undefined,
+        branch_name: streams.getStreamBranchName(this.db, stream.id),
+        is_local_mode: stream.isLocalMode,
+        metadata: stream.metadata,
+      });
+    }
+    return streamId;
   }
 
   mergeStream(options: MergeStreamOptions): MergeResult {
-    return streams.mergeStream(this.db, this.repoPath, options);
+    let sourceCommit: string | undefined;
+    try {
+      sourceCommit = streams.getStreamHead(this.db, this.repoPath, options.sourceStream);
+    } catch {
+      // Source stream may not have a resolvable head; emit without it.
+    }
+    const result = streams.mergeStream(this.db, this.repoPath, options);
+    if (result.success && result.newHead) {
+      this.emit(CASCADE_METHOD_SUFFIXES.STREAM_MERGED, {
+        source_stream_id: options.sourceStream,
+        target_stream_id: options.targetStream,
+        merge_commit: result.newHead,
+        agent_id: options.agentId,
+        strategy: options.strategy ?? 'merge-commit',
+        source_commit: sourceCommit,
+      });
+    } else if (!result.success && result.conflicts && result.conflicts.length > 0) {
+      this.emit(CASCADE_METHOD_SUFFIXES.STREAM_CONFLICTED, {
+        stream_id: options.sourceStream,
+        conflicted_files: result.conflicts,
+        agent_id: options.agentId,
+        source: 'merge',
+      });
+    }
+    return result;
   }
 
   listStreams(options?: {
@@ -326,7 +441,17 @@ export class MultiAgentRepoTracker {
   // ─────────────────────────────────────────────────────────────────────────────
 
   rebaseOntoStream(options: RebaseOntoStreamOptions): RebaseResult {
-    return streams.rebaseOntoStream(this.db, this.repoPath, options);
+    const result = streams.rebaseOntoStream(this.db, this.repoPath, options);
+    if (!result.success && result.conflicts && result.conflicts.length > 0) {
+      this.emit(CASCADE_METHOD_SUFFIXES.STREAM_CONFLICTED, {
+        stream_id: options.sourceStream,
+        conflict_id: result.conflictId,
+        conflicted_files: result.conflicts.map((c) => c.file),
+        agent_id: options.agentId,
+        source: 'rebase',
+      });
+    }
+    return result;
   }
 
   /**
@@ -337,7 +462,17 @@ export class MultiAgentRepoTracker {
    * when a conflictHandler is provided with onConflict='agent'.
    */
   async rebaseOntoStreamAsync(options: RebaseOntoStreamOptions): Promise<RebaseResult> {
-    return streams.rebaseOntoStreamAsync(this.db, this.repoPath, options);
+    const result = await streams.rebaseOntoStreamAsync(this.db, this.repoPath, options);
+    if (!result.success && result.conflicts && result.conflicts.length > 0) {
+      this.emit(CASCADE_METHOD_SUFFIXES.STREAM_CONFLICTED, {
+        stream_id: options.sourceStream,
+        conflict_id: result.conflictId,
+        conflicted_files: result.conflicts.map((c) => c.file),
+        agent_id: options.agentId,
+        source: 'rebase',
+      });
+    }
+    return result;
   }
 
   syncWithParent(
@@ -346,7 +481,7 @@ export class MultiAgentRepoTracker {
     worktree: string,
     onConflict?: ConflictStrategy
   ): RebaseResult {
-    return streams.syncWithParent(
+    const result = streams.syncWithParent(
       this.db,
       this.repoPath,
       streamId,
@@ -354,6 +489,16 @@ export class MultiAgentRepoTracker {
       worktree,
       onConflict
     );
+    if (!result.success && result.conflicts && result.conflicts.length > 0) {
+      this.emit(CASCADE_METHOD_SUFFIXES.STREAM_CONFLICTED, {
+        stream_id: streamId,
+        conflict_id: result.conflictId,
+        conflicted_files: result.conflicts.map((c) => c.file),
+        agent_id: agentId,
+        source: 'sync',
+      });
+    }
+    return result;
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -381,7 +526,16 @@ export class MultiAgentRepoTracker {
   // ─────────────────────────────────────────────────────────────────────────────
 
   createConflict(options: CreateConflictOptions): string {
-    return conflicts.createConflict(this.db, options);
+    const conflictId = conflicts.createConflict(this.db, options);
+    this.emit(CASCADE_METHOD_SUFFIXES.STREAM_CONFLICTED, {
+      stream_id: options.streamId,
+      conflict_id: conflictId,
+      conflicted_files: options.conflictedFiles,
+      conflicting_commit: options.conflictingCommit,
+      target_commit: options.targetCommit,
+      source: 'manual',
+    });
+    return conflictId;
   }
 
   getConflict(conflictId: string): ConflictRecord | null {
@@ -440,7 +594,21 @@ export class MultiAgentRepoTracker {
    * ```
    */
   trackExistingBranch(options: streams.TrackExistingBranchOptions): string {
-    return streams.trackExistingBranch(this.db, this.repoPath, options);
+    const streamId = streams.trackExistingBranch(this.db, this.repoPath, options);
+    const stream = streams.getStream(this.db, streamId);
+    if (stream) {
+      this.emit(CASCADE_METHOD_SUFFIXES.STREAM_OPENED, {
+        stream_id: stream.id,
+        name: stream.name,
+        agent_id: stream.agentId,
+        base_commit: stream.baseCommit,
+        parent_stream: stream.parentStream ?? undefined,
+        branch_name: stream.existingBranch ?? streams.getStreamBranchName(this.db, stream.id),
+        is_local_mode: stream.isLocalMode,
+        metadata: stream.metadata,
+      });
+    }
+    return streamId;
   }
 
   /**
@@ -526,6 +694,13 @@ export class MultiAgentRepoTracker {
     agentId: string;
     worktree: string;
     message: string;
+    /**
+     * Optional metadata threaded through to emitted events. The tracker does
+     * not interpret this — it is passed to the `cascade/stream.committed`
+     * event verbatim so observers can correlate commits with external
+     * concepts (e.g., OpenTasks task refs).
+     */
+    metadata?: Record<string, unknown>;
   }): { commit: string; changeId: string } {
     // Block if stream is conflicted
     const stream = this.getStream(options.streamId);
@@ -571,6 +746,17 @@ export class MultiAgentRepoTracker {
       beforeState,
       afterState: result.commit,
       metadata: { changeId: result.changeId },
+    });
+
+    this.emit(CASCADE_METHOD_SUFFIXES.STREAM_COMMITTED, {
+      stream_id: options.streamId,
+      commit_hash: result.commit,
+      change_id: result.changeId,
+      agent_id: options.agentId,
+      message_summary: description,
+      files_touched: git.getFilesInCommit(result.commit, gitOpts),
+      parent_commit: beforeState,
+      metadata: options.metadata,
     });
 
     return result;
@@ -750,7 +936,37 @@ export class MultiAgentRepoTracker {
    * @throws TaskConflictError if merge conflicts occur
    */
   completeTask(options: CompleteTaskOptions): CompleteTaskResult {
-    return workerTasks.completeTask(this.db, this.repoPath, options);
+    const task = workerTasks.getTask(this.db, options.taskId);
+    try {
+      const result = workerTasks.completeTask(this.db, this.repoPath, options);
+      if (task) {
+        this.emit(CASCADE_METHOD_SUFFIXES.STREAM_MERGED, {
+          source_stream_id: task.branchName ?? `worker:${task.id}`,
+          target_stream_id: task.streamId,
+          merge_commit: result.mergeCommit,
+          agent_id: task.agentId ?? '',
+          strategy: 'task-merge',
+          source_commit: task.startCommit ?? undefined,
+          metadata: {
+            task_id: task.id,
+            task_title: task.title,
+            ...task.metadata,
+          },
+        });
+      }
+      return result;
+    } catch (err) {
+      if (err instanceof TaskConflictError && task) {
+        this.emit(CASCADE_METHOD_SUFFIXES.STREAM_CONFLICTED, {
+          stream_id: task.streamId,
+          conflicted_files: err.conflicts,
+          agent_id: task.agentId ?? undefined,
+          source: 'task-complete',
+          metadata: { task_id: task.id },
+        });
+      }
+      throw err;
+    }
   }
 
   /**

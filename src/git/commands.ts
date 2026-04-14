@@ -167,6 +167,29 @@ export function getChangedFiles(options: GitOptions): string[] {
 }
 
 /**
+ * Get list of files modified by a specific commit (relative to its first parent).
+ *
+ * For a merge commit, returns files differing from the first parent.
+ * For an initial commit (no parent), returns all files in the tree.
+ * Returns an empty array on failure rather than throwing — this helper is
+ * used in non-critical observability paths.
+ */
+export function getFilesInCommit(commit: string, options: GitOptions): string[] {
+  try {
+    // --no-commit-id suppresses the commit hash header; -r recurses into trees;
+    // -m treats merges as if they were diffed against the first parent.
+    const output = git(
+      ['diff-tree', '--no-commit-id', '--name-only', '-r', '-m', commit],
+      options
+    );
+    if (!output) return [];
+    return output.split('\n').map((line) => line.trim()).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Stage all changes.
  */
 export function stageAll(options: GitOptions): void {

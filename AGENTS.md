@@ -81,6 +81,22 @@ src/
 - **Status:** `draft` | `review` | `approved` | `merged`
 - **Key functions:** `createReviewBlock`, `setReviewStatus`, `getStack`, `autoPopulateStack`
 
+### Event Emission (`src/events/index.ts`)
+- **What:** Optional hook for observing cascade operations. Transport-agnostic (`emit` is a plain function).
+- **MAP-compatible by design:** Default method names use the MAP vendor-extension convention (`x-cascade/stream.opened`, `x-cascade/stream.committed`, `x-cascade/stream.merged`, `x-cascade/stream.conflicted`, `x-cascade/stream.abandoned`). Runtimes embedding cascade alongside a MAP connection forward emitted events verbatim as MAP notifications — no translation needed.
+- **Configurable prefix:** `TrackerOptions.eventPrefix` (default `x-cascade`). Only the prefix varies; suffixes are fixed. Consumers narrowing on event type should match on the suffix (see `matchCascadeSuffix`).
+- **Fire-and-forget:** Emits fire synchronously after the corresponding DB write, before the tracker method returns. Exceptions in the callback are caught and discarded. No emitter = no runtime cost beyond a single null check.
+- **Key exports:** `CASCADE_METHODS` (default-prefixed names), `CASCADE_METHOD_SUFFIXES` (canonical suffixes), `buildCascadeMethods(prefix)`, `matchCascadeSuffix(method)`, `CascadeEmitter`, payload types (`StreamOpenedParams`, etc.).
+
+Example:
+```typescript
+const tracker = new MultiAgentRepoTracker({
+  repoPath: '/path/to/repo',
+  emit: (method, params) => mapClient.notify(method, params),  // forward to MAP
+  eventPrefix: 'x-acme-cascade',  // optional; defaults to 'x-cascade'
+});
+```
+
 ## Key Interfaces
 
 ```typescript
@@ -201,7 +217,8 @@ npm test           # Run tests
 2. **`src/streams.ts`** - Core stream operations
 3. **`src/models/stream.ts`** - Key interfaces
 4. **`src/db/database.ts`** - Schema definition
-5. **`docs/OVERVIEW.md`** - Detailed documentation
+5. **`src/events/index.ts`** - Event schema + MAP-compatibility docs
+6. **`docs/OVERVIEW.md`** - Detailed documentation
 
 ## Architecture Notes
 
