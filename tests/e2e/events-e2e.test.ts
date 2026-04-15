@@ -20,6 +20,8 @@ import {
   type StreamMergedParams,
   type StreamConflictedParams,
   type StreamAbandonedParams,
+  type CascadeRebasedParams,
+  type CascadeCompletedParams,
 } from '../../src/index.js';
 import { createTestRepo, type TestRepo } from '../setup.js';
 
@@ -266,6 +268,111 @@ describe('E2E: Cascade Event Emission', () => {
       expect(cp.agent_id).toBe(agentB);
       expect(cp.source).toBe('sync');
       expect(cp.conflicted_files.some((f) => f.includes('shared.txt'))).toBe(true);
+    } finally {
+      tracker.close();
+    }
+  });
+
+  it('emits cascade.rebased per dependent + cascade.completed with the walk summary', () => {
+    const { emit, events } = createCapturingEmitter();
+    const tracker = new MultiAgentRepoTracker({
+      repoPath: testRepo.path,
+      emit,
+      skipRecovery: true,
+    });
+
+    try {
+      const agentA = 'agent-alpha';
+      const agentB = 'agent-beta';
+      const worktreeA = path.join(testRepo.path, '.worktrees', agentA);
+      const worktreeB = path.join(testRepo.path, '.worktrees', agentB);
+
+      // Parent stream with an initial commit.
+      const parentId = tracker.createStream({ name: 'parent', agentId: agentA });
+      tracker.createWorktree({
+        agentId: agentA,
+        path: worktreeA,
+        branch: `stream/${parentId}`,
+      });
+      fs.writeFileSync(path.join(worktreeA, 'base.txt'), 'base\n');
+      execSync('git add .', { cwd: worktreeA, stdio: 'pipe' });
+      tracker.commitChanges({
+        streamId: parentId,
+        agentId: agentA,
+        worktree: worktreeA,
+        message: 'base: init',
+      });
+
+      // Child stream forked from parent with its own commit.
+      const childId = tracker.forkStream({
+        parentStreamId: parentId,
+        name: 'child',
+        agentId: agentB,
+      });
+      tracker.createWorktree({
+        agentId: agentB,
+        path: worktreeB,
+        branch: `stream/${childId}`,
+      });
+      fs.writeFileSync(path.join(worktreeB, 'child.txt'), 'child work\n');
+      execSync('git add .', { cwd: worktreeB, stdio: 'pipe' });
+      tracker.commitChanges({
+        streamId: childId,
+        agentId: agentB,
+        worktree: worktreeB,
+        message: 'feat: child work',
+      });
+
+      // Parent gains another commit so there's something for child to rebase onto.
+      fs.writeFileSync(path.join(worktreeA, 'base.txt'), 'base v2\n');
+      execSync('git add .', { cwd: worktreeA, stdio: 'pipe' });
+      tracker.commitChanges({
+        streamId: parentId,
+        agentId: agentA,
+        worktree: worktreeA,
+        message: 'base: v2',
+      });
+
+      events.length = 0;
+
+      // Cascade rebase dependents of parent (i.e., child).
+      const result = tracker.cascadeRebase({
+        rootStream: parentId,
+        agentId: agentA,
+        worktree: { mode: 'callback', provider: () => worktreeB },
+        strategy: 'stop_on_conflict',
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.updated).toEqual([childId]);
+
+      // Exactly one cascade.rebased event.
+      const rebased = events.filter(
+        (e) => e.method === CASCADE_METHODS.CASCADE_REBASED
+      );
+      expect(rebased).toHaveLength(1);
+      const rp = rebased[0].params as CascadeRebasedParams;
+      expect(rp.stream_id).toBe(childId);
+      expect(rp.agent_id).toBe(agentA);
+      expect(rp.triggered_by_stream_id).toBe(parentId);
+      expect(rp.new_commits.length).toBeGreaterThanOrEqual(1);
+      // The child's original 'feat: child work' should show up as a new commit
+      // in the rebased range.
+      const summaries = rp.new_commits.map((c) => c.message_summary);
+      expect(summaries.some((s) => s.includes('feat: child work'))).toBe(true);
+      // Each rebased commit should carry a Change-Id trailer.
+      expect(rp.new_commits.every((c) => typeof c.change_id === 'string' && c.change_id.length > 0)).toBe(true);
+
+      // cascade.completed fires with the summary.
+      const completed = events.find(
+        (e) => e.method === CASCADE_METHODS.CASCADE_COMPLETED
+      );
+      expect(completed).toBeDefined();
+      const cp = completed!.params as CascadeCompletedParams;
+      expect(cp.root_stream_id).toBe(parentId);
+      expect(cp.updated_streams).toEqual([childId]);
+      expect(cp.failed_streams).toEqual([]);
+      expect(cp.skipped_streams).toEqual([]);
     } finally {
       tracker.close();
     }

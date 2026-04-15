@@ -23,6 +23,8 @@ import {
   type StreamMergedParams,
   type StreamConflictedParams,
   type StreamAbandonedParams,
+  type CascadeRebasedParams,
+  type CascadeCompletedParams,
 } from '../src/index.js';
 import { createTestRepo, type TestRepo } from './setup.js';
 
@@ -283,6 +285,49 @@ describe('cascade event emission', () => {
         // Should not throw despite the emitter throwing.
         const streamId = tracker.createStream({ name: 'feat', agentId: 'agent-1' });
         expect(streamId).toBeTruthy();
+      } finally {
+        tracker.close();
+      }
+    });
+  });
+
+  describe('cascade.completed (no dependents)', () => {
+    it('fires cascade.completed with empty results when root has no dependents', () => {
+      const { emit, events } = createCapturingEmitter();
+      const tracker = new MultiAgentRepoTracker({ repoPath: testRepo.path, emit });
+      try {
+        const rootId = tracker.createStream({ name: 'root', agentId: 'a' });
+        events.length = 0;
+
+        const result = tracker.cascadeRebase({
+          rootStream: rootId,
+          agentId: 'a',
+          worktree: { mode: 'callback', provider: () => testRepo.path },
+        });
+
+        expect(result.success).toBe(true);
+        expect(result.updated).toEqual([]);
+
+        const completed = events.find(
+          (e) => e.method === CASCADE_METHODS.CASCADE_COMPLETED
+        );
+        expect(completed).toBeDefined();
+        const params = completed!.params as {
+          root_stream_id: string;
+          updated_streams: string[];
+          failed_streams: unknown[];
+          skipped_streams: string[];
+        };
+        expect(params.root_stream_id).toBe(rootId);
+        expect(params.updated_streams).toEqual([]);
+        expect(params.failed_streams).toEqual([]);
+        expect(params.skipped_streams).toEqual([]);
+
+        // No cascade.rebased should fire when there are no dependents.
+        const rebased = events.filter(
+          (e) => e.method === CASCADE_METHODS.CASCADE_REBASED
+        );
+        expect(rebased).toHaveLength(0);
       } finally {
         tracker.close();
       }

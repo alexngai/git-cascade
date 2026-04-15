@@ -18,6 +18,13 @@ import type {
   RebaseResult,
   ConflictHandler,
 } from './models/index.js';
+import {
+  CASCADE_METHOD_SUFFIXES,
+  DEFAULT_CASCADE_PREFIX,
+  type CascadeEmitter,
+  type CascadeRebasedCommit,
+  type EventMetadata,
+} from './events/index.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Cascade Rebase Options
@@ -36,6 +43,17 @@ export interface CascadeRebaseOptions {
   conflictHandlers?: Map<string, ConflictHandler>;
   /** Timeout for conflict handlers in ms (default: 300000 = 5 min) */
   conflictTimeout?: number;
+  /**
+   * Optional event emitter. Fires `cascade.rebased` per successful dependent
+   * rebase and `cascade.completed` at the end of the walk. Uses the same
+   * signature as `TrackerOptions.emit` and is safe to pass the tracker's
+   * emitter through — the tracker's `cascadeRebase()` wrapper does this.
+   */
+  emit?: CascadeEmitter;
+  /** Prefix for emitted method names. Default `x-cascade`. */
+  eventPrefix?: string;
+  /** Optional metadata threaded through to every emitted event verbatim. */
+  eventMetadata?: EventMetadata;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -63,11 +81,31 @@ export function cascadeRebase(
   const strategy = options.strategy ?? 'stop_on_conflict';
   const conflictHandlers = options.conflictHandlers;
   const conflictTimeout = options.conflictTimeout ?? 300000;
+  const prefix = options.eventPrefix ?? DEFAULT_CASCADE_PREFIX;
+  const emit = options.emit;
+  const emitSafe = (suffix: string, params: unknown): void => {
+    if (!emit) return;
+    try {
+      emit(`${prefix}/${suffix}`, params);
+    } catch {
+      // Observability failures must not break cascade progress.
+    }
+  };
+  const failureReasons = new Map<string, string>();
 
   // Get all dependents of root stream
   const dependents = deps.getAllDependents(db, rootStream);
 
   if (dependents.length === 0) {
+    emitSafe(CASCADE_METHOD_SUFFIXES.CASCADE_COMPLETED, {
+      root_stream_id: rootStream,
+      agent_id: agentId,
+      strategy,
+      updated_streams: [],
+      failed_streams: [],
+      skipped_streams: [],
+      metadata: options.eventMetadata,
+    });
     return {
       success: true,
       updated: [],
@@ -98,20 +136,16 @@ export function cascadeRebase(
       const deferredDeps = streamDeps.filter((d) => deferred.includes(d));
 
       if (failedDeps.length > 0) {
-        results[streamId] = {
-          success: false,
-          error: `Skipped: dependencies failed: ${failedDeps.join(', ')}`,
-        };
+        const reason = `Skipped: dependencies failed: ${failedDeps.join(', ')}`;
+        results[streamId] = { success: false, error: reason };
         skipped.push(streamId);
         continue;
       }
 
       // For defer_conflicts, skip streams whose dependencies are conflicted
       if (deferredDeps.length > 0) {
-        results[streamId] = {
-          success: false,
-          error: `Skipped: dependencies have unresolved conflicts: ${deferredDeps.join(', ')}`,
-        };
+        const reason = `Skipped: dependencies have unresolved conflicts: ${deferredDeps.join(', ')}`;
+        results[streamId] = { success: false, error: reason };
         skipped.push(streamId);
         continue;
       }
@@ -176,7 +210,32 @@ export function cascadeRebase(
 
       if (result.success) {
         updated.push(streamId);
+        // Emit cascade.rebased with new commits produced by this rebase.
+        // Walking (newBaseCommit..newHead) gives us the rebased commit list.
+        if (emit && result.newHead && result.newBaseCommit) {
+          try {
+            const newCommits = computeRebasedCommits(
+              result.newBaseCommit,
+              result.newHead,
+              worktreePath
+            );
+            emitSafe(CASCADE_METHOD_SUFFIXES.CASCADE_REBASED, {
+              stream_id: streamId,
+              agent_id: agentId,
+              triggered_by_stream_id: rootStream,
+              triggered_by_agent_id: agentId,
+              new_base_commit: result.newBaseCommit,
+              new_head: result.newHead,
+              new_commits: newCommits,
+              metadata: options.eventMetadata,
+            });
+          } catch {
+            // Computing commits is a best-effort observability step; the
+            // rebase itself has already succeeded and been persisted.
+          }
+        }
       } else if (result.conflicts && result.conflicts.length > 0) {
+        const reason = result.error ?? `Conflicts: ${result.conflicts.length} file(s)`;
         // Handle conflict based on strategy
         if (strategy === 'defer_conflicts') {
           // Record the conflict and mark stream as deferred
@@ -184,18 +243,23 @@ export function cascadeRebase(
           if (result.conflictId) {
             conflictRecords[streamId] = result.conflictId;
           }
+          failureReasons.set(streamId, reason);
           // Continue processing other streams
         } else if (strategy === 'skip_conflicting') {
           failed.push(streamId);
+          failureReasons.set(streamId, reason);
           // Continue processing other streams
         } else {
           // stop_on_conflict
           failed.push(streamId);
+          failureReasons.set(streamId, reason);
           break;
         }
       } else {
         // Non-conflict failure
+        const reason = result.error ?? 'Unknown rebase failure';
         failed.push(streamId);
+        failureReasons.set(streamId, reason);
 
         if (strategy === 'stop_on_conflict') {
           break;
@@ -206,6 +270,21 @@ export function cascadeRebase(
     // Always cleanup the provider
     provider.cleanup();
   }
+
+  // Emit cascade.completed summarizing the walk.
+  emitSafe(CASCADE_METHOD_SUFFIXES.CASCADE_COMPLETED, {
+    root_stream_id: rootStream,
+    agent_id: agentId,
+    strategy,
+    updated_streams: updated.slice(),
+    failed_streams: failed.map((streamId) => ({
+      stream_id: streamId,
+      reason: failureReasons.get(streamId) ?? 'unknown',
+    })),
+    skipped_streams: skipped.slice(),
+    deferred_streams: deferred.length > 0 ? deferred.slice() : undefined,
+    metadata: options.eventMetadata,
+  });
 
   return {
     success: failed.length === 0 && skipped.length === 0 && deferred.length === 0,
@@ -446,4 +525,59 @@ export function resumeCascade(
     deferred: allDeferred.length > 0 ? allDeferred : undefined,
     conflictRecords: Object.keys(conflictRecords).length > 0 ? conflictRecords : undefined,
   };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Parse the Change-Id trailer from a commit message body, if present.
+ * Gerrit-style: a trailer line like `Change-Id: c-xxxxxxxx`.
+ */
+function extractChangeId(message: string): string | undefined {
+  const match = message.match(/^Change-Id:\s*(\S+)\s*$/m);
+  return match ? match[1] : undefined;
+}
+
+/**
+ * Compute the list of rebased commits for a `cascade.rebased` event.
+ *
+ * Walks `newBase..newHead` in the given worktree, extracting commit hash,
+ * Change-Id trailer, first-line message summary, and files touched. Returns
+ * an empty array if the range is empty or any git operation fails (this is
+ * an observability step and must not break cascade progress).
+ */
+function computeRebasedCommits(
+  newBase: string,
+  newHead: string,
+  worktreePath: string
+): CascadeRebasedCommit[] {
+  const gitOpts = { cwd: worktreePath };
+  let hashes: string[];
+  try {
+    hashes = git.getCommitRange(newBase, newHead, gitOpts);
+  } catch {
+    return [];
+  }
+  const commits: CascadeRebasedCommit[] = [];
+  let parent = newBase;
+  for (const hash of hashes) {
+    let message = '';
+    try {
+      message = git.getCommitMessage(hash, gitOpts);
+    } catch {
+      // Keep going — we'll emit with empty summary rather than skip.
+    }
+    const summary = message.split('\n')[0] ?? '';
+    commits.push({
+      commit_hash: hash,
+      change_id: extractChangeId(message),
+      parent_commit: parent,
+      message_summary: summary,
+      files_touched: git.getFilesInCommit(hash, gitOpts),
+    });
+    parent = hash;
+  }
+  return commits;
 }

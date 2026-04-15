@@ -77,6 +77,7 @@ import {
   type CascadeSuffixMap,
 } from './events/index.js';
 import { TaskConflictError } from './worker-tasks.js';
+import * as cascadeModule from './cascade.js';
 
 export interface TrackerOptions {
   /** Path to the git repository */
@@ -499,6 +500,25 @@ export class MultiAgentRepoTracker {
       });
     }
     return result;
+  }
+
+  /**
+   * Run a cascade rebase rooted at `options.rootStream`, propagating changes
+   * to all dependent streams. Convenience wrapper over `cascade.cascadeRebase`
+   * that threads the tracker's `emit` and `eventPrefix` through so listeners
+   * receive `cascade.rebased` (per dependent) and `cascade.completed` events.
+   *
+   * Callers with their own emit callback should use the module-level
+   * `cascade.cascadeRebase` function directly.
+   */
+  cascadeRebase(
+    options: Omit<cascadeModule.CascadeRebaseOptions, 'emit' | 'eventPrefix'>
+  ): import('./models/index.js').CascadeResult {
+    return cascadeModule.cascadeRebase(this.db, this.repoPath, {
+      ...options,
+      emit: this.emitter ?? undefined,
+      eventPrefix: this.eventPrefix,
+    });
   }
 
   // ─────────────────────────────────────────────────────────────────────────────

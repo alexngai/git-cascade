@@ -73,6 +73,8 @@ export const CASCADE_METHOD_SUFFIXES = {
   STREAM_MERGED: 'stream.merged',
   STREAM_CONFLICTED: 'stream.conflicted',
   STREAM_ABANDONED: 'stream.abandoned',
+  CASCADE_REBASED: 'cascade.rebased',
+  CASCADE_COMPLETED: 'cascade.completed',
 } as const;
 
 export type CascadeMethodSuffix =
@@ -97,6 +99,8 @@ export const CASCADE_METHODS = {
   STREAM_MERGED: `${DEFAULT_CASCADE_PREFIX}/${CASCADE_METHOD_SUFFIXES.STREAM_MERGED}`,
   STREAM_CONFLICTED: `${DEFAULT_CASCADE_PREFIX}/${CASCADE_METHOD_SUFFIXES.STREAM_CONFLICTED}`,
   STREAM_ABANDONED: `${DEFAULT_CASCADE_PREFIX}/${CASCADE_METHOD_SUFFIXES.STREAM_ABANDONED}`,
+  CASCADE_REBASED: `${DEFAULT_CASCADE_PREFIX}/${CASCADE_METHOD_SUFFIXES.CASCADE_REBASED}`,
+  CASCADE_COMPLETED: `${DEFAULT_CASCADE_PREFIX}/${CASCADE_METHOD_SUFFIXES.CASCADE_COMPLETED}`,
 } as const;
 
 export type CascadeMethod = (typeof CASCADE_METHODS)[keyof typeof CASCADE_METHODS];
@@ -122,6 +126,8 @@ export function buildCascadeMethods(prefix: string): {
   STREAM_MERGED: string;
   STREAM_CONFLICTED: string;
   STREAM_ABANDONED: string;
+  CASCADE_REBASED: string;
+  CASCADE_COMPLETED: string;
 } {
   return {
     STREAM_OPENED: `${prefix}/${CASCADE_METHOD_SUFFIXES.STREAM_OPENED}`,
@@ -129,6 +135,8 @@ export function buildCascadeMethods(prefix: string): {
     STREAM_MERGED: `${prefix}/${CASCADE_METHOD_SUFFIXES.STREAM_MERGED}`,
     STREAM_CONFLICTED: `${prefix}/${CASCADE_METHOD_SUFFIXES.STREAM_CONFLICTED}`,
     STREAM_ABANDONED: `${prefix}/${CASCADE_METHOD_SUFFIXES.STREAM_ABANDONED}`,
+    CASCADE_REBASED: `${prefix}/${CASCADE_METHOD_SUFFIXES.CASCADE_REBASED}`,
+    CASCADE_COMPLETED: `${prefix}/${CASCADE_METHOD_SUFFIXES.CASCADE_COMPLETED}`,
   };
 }
 
@@ -267,6 +275,75 @@ export interface StreamAbandonedParams {
   metadata?: EventMetadata;
 }
 
+/**
+ * A single commit produced by a cascade rebase operation. Shape is a subset
+ * of StreamCommittedParams — the hub can record these via the same code path.
+ */
+export interface CascadeRebasedCommit {
+  commit_hash: string;
+  /** Change-Id trailer, if the commit carries one */
+  change_id?: string;
+  /** Parent commit */
+  parent_commit: string;
+  /** First line of commit message */
+  message_summary: string;
+  /** Files modified by this commit */
+  files_touched: string[];
+}
+
+/**
+ * Fired once per dependent stream successfully rebased by `cascadeRebase`.
+ *
+ * Replaces the Phase 0 gap where rebased commits weren't emitted as
+ * stream.committed — cascade.rebased carries the new commits in a richer
+ * shape with explicit "triggered_by" attribution, so consumers can
+ * distinguish original commits from rebase-derived ones.
+ */
+export interface CascadeRebasedParams {
+  /** Stream that was rebased */
+  stream_id: string;
+  /** Agent performing the cascade */
+  agent_id: string;
+  /** Root stream whose rebase triggered this cascade */
+  triggered_by_stream_id: string;
+  /** Agent who triggered the root rebase, if different from `agent_id` */
+  triggered_by_agent_id?: string;
+  /** New base commit after rebase */
+  new_base_commit: string;
+  /** New head commit after rebase */
+  new_head: string;
+  /** Commits produced by the rebase, in order */
+  new_commits: CascadeRebasedCommit[];
+  /** Caller metadata (threaded through CascadeRebaseOptions.metadata) */
+  metadata?: EventMetadata;
+}
+
+/**
+ * Fired once per `cascadeRebase` invocation, summarizing the outcome.
+ *
+ * Useful for hub-level observability (how many streams were updated, which
+ * failed) and UI dashboards. Individual `cascade.rebased` events provide
+ * the per-stream detail.
+ */
+export interface CascadeCompletedParams {
+  /** Root stream whose rebase triggered the cascade */
+  root_stream_id: string;
+  /** Agent that triggered the cascade */
+  agent_id: string;
+  /** Strategy applied */
+  strategy: 'stop_on_conflict' | 'skip_conflicting' | 'defer_conflicts';
+  /** Streams rebased successfully */
+  updated_streams: string[];
+  /** Streams that failed (non-conflict errors) */
+  failed_streams: Array<{ stream_id: string; reason: string }>;
+  /** Streams skipped because an upstream dependency failed */
+  skipped_streams: string[];
+  /** Streams with deferred conflicts (defer_conflicts strategy) */
+  deferred_streams?: string[];
+  /** Caller metadata */
+  metadata?: EventMetadata;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Method → payload mapping
 // ─────────────────────────────────────────────────────────────────────────────
@@ -282,6 +359,8 @@ export interface CascadeSuffixMap {
   'stream.merged': StreamMergedParams;
   'stream.conflicted': StreamConflictedParams;
   'stream.abandoned': StreamAbandonedParams;
+  'cascade.rebased': CascadeRebasedParams;
+  'cascade.completed': CascadeCompletedParams;
 }
 
 /**
@@ -295,6 +374,8 @@ export interface CascadeMethodMap {
   'x-cascade/stream.merged': StreamMergedParams;
   'x-cascade/stream.conflicted': StreamConflictedParams;
   'x-cascade/stream.abandoned': StreamAbandonedParams;
+  'x-cascade/cascade.rebased': CascadeRebasedParams;
+  'x-cascade/cascade.completed': CascadeCompletedParams;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
