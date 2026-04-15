@@ -443,15 +443,7 @@ export class MultiAgentRepoTracker {
 
   rebaseOntoStream(options: RebaseOntoStreamOptions): RebaseResult {
     const result = streams.rebaseOntoStream(this.db, this.repoPath, options);
-    if (!result.success && result.conflicts && result.conflicts.length > 0) {
-      this.emit(CASCADE_METHOD_SUFFIXES.STREAM_CONFLICTED, {
-        stream_id: options.sourceStream,
-        conflict_id: result.conflictId,
-        conflicted_files: result.conflicts.map((c) => c.file),
-        agent_id: options.agentId,
-        source: 'rebase',
-      });
-    }
+    this.emitRebaseResult(result, options.sourceStream, options.targetStream, options.agentId, options.worktree, 'rebase');
     return result;
   }
 
@@ -464,15 +456,7 @@ export class MultiAgentRepoTracker {
    */
   async rebaseOntoStreamAsync(options: RebaseOntoStreamOptions): Promise<RebaseResult> {
     const result = await streams.rebaseOntoStreamAsync(this.db, this.repoPath, options);
-    if (!result.success && result.conflicts && result.conflicts.length > 0) {
-      this.emit(CASCADE_METHOD_SUFFIXES.STREAM_CONFLICTED, {
-        stream_id: options.sourceStream,
-        conflict_id: result.conflictId,
-        conflicted_files: result.conflicts.map((c) => c.file),
-        agent_id: options.agentId,
-        source: 'rebase',
-      });
-    }
+    this.emitRebaseResult(result, options.sourceStream, options.targetStream, options.agentId, options.worktree, 'rebase');
     return result;
   }
 
@@ -490,16 +474,74 @@ export class MultiAgentRepoTracker {
       worktree,
       onConflict
     );
-    if (!result.success && result.conflicts && result.conflicts.length > 0) {
-      this.emit(CASCADE_METHOD_SUFFIXES.STREAM_CONFLICTED, {
+    // For sync we don't know the target stream by id (it's resolved internally
+    // as the parent); pass undefined and let receivers infer from stream context.
+    this.emitRebaseResult(result, streamId, undefined, agentId, worktree, 'sync');
+    return result;
+  }
+
+  /**
+   * Centralised emission for rebase/sync results. Fires `stream.conflicted`
+   * on conflict, or one `stream.committed` event per new commit produced by
+   * a successful rebase (closes the Phase 0 gap where rebased commits
+   * weren't projected outside the cascadeRebase flow).
+   */
+  private emitRebaseResult(
+    result: RebaseResult,
+    streamId: string,
+    targetStream: string | undefined,
+    agentId: string,
+    worktree: string,
+    source: 'rebase' | 'sync'
+  ): void {
+    if (!result.success) {
+      if (result.conflicts && result.conflicts.length > 0) {
+        this.emit(CASCADE_METHOD_SUFFIXES.STREAM_CONFLICTED, {
+          stream_id: streamId,
+          conflict_id: result.conflictId,
+          conflicted_files: result.conflicts.map((c) => c.file),
+          agent_id: agentId,
+          source,
+        });
+      }
+      return;
+    }
+    if (!result.newBaseCommit || !result.newHead) return;
+    // Successful rebase: walk new commits in (newBase..newHead) and emit
+    // per-commit stream.committed events. Best-effort — this is observability,
+    // not part of the rebase semantics.
+    let commits: Array<{
+      commit_hash: string;
+      change_id?: string;
+      parent_commit: string;
+      message_summary: string;
+      files_touched: string[];
+    }> = [];
+    try {
+      commits = cascadeModule.computeRebasedCommits(
+        result.newBaseCommit,
+        result.newHead,
+        worktree
+      );
+    } catch {
+      return;
+    }
+    for (const c of commits) {
+      this.emit(CASCADE_METHOD_SUFFIXES.STREAM_COMMITTED, {
         stream_id: streamId,
-        conflict_id: result.conflictId,
-        conflicted_files: result.conflicts.map((c) => c.file),
+        commit_hash: c.commit_hash,
+        change_id: c.change_id ?? '',
         agent_id: agentId,
-        source: 'sync',
+        message_summary: c.message_summary,
+        files_touched: c.files_touched,
+        parent_commit: c.parent_commit,
+        metadata: {
+          rebased: true,
+          rebase_source: source,
+          ...(targetStream ? { rebased_onto_stream_id: targetStream } : {}),
+        },
       });
     }
-    return result;
   }
 
   /**
@@ -564,6 +606,54 @@ export class MultiAgentRepoTracker {
 
   getConflictForStream(streamId: string): ConflictRecord | null {
     return conflicts.getConflictForStream(this.db, streamId);
+  }
+
+  /**
+   * Mark a conflict as resolved and emit `stream.conflict_resolved`. Use
+   * this in preference to `conflicts.resolveConflict` directly so observers
+   * (e.g., the OpenHive hub) can update conflict status from `pending` to
+   * `resolved` and avoid a stuck-conflict appearance.
+   */
+  resolveConflict(
+    conflictId: string,
+    resolution: import('./models/index.js').ConflictResolution & { summary?: string },
+    options: { metadata?: import('./events/index.js').EventMetadata } = {}
+  ): void {
+    const conflict = conflicts.getConflict(this.db, conflictId);
+    conflicts.resolveConflict(this.db, conflictId, resolution);
+    if (conflict) {
+      this.emit(CASCADE_METHOD_SUFFIXES.STREAM_CONFLICT_RESOLVED, {
+        stream_id: conflict.streamId,
+        conflict_id: conflictId,
+        resolution_method: resolution.method,
+        resolved_by: resolution.resolvedBy,
+        resolution_summary: resolution.summary ?? resolution.details,
+        metadata: options.metadata,
+      });
+    }
+  }
+
+  /**
+   * Abandon a conflict (typically because the agent abandoned the stream
+   * rather than resolving). Emits `stream.conflict_resolved` with method
+   * `'abandoned'` so observers see the conflict is no longer pending.
+   */
+  abandonConflict(
+    conflictId: string,
+    options: { agentId?: string; reason?: string; metadata?: import('./events/index.js').EventMetadata } = {}
+  ): void {
+    const conflict = conflicts.getConflict(this.db, conflictId);
+    conflicts.abandonConflict(this.db, conflictId);
+    if (conflict) {
+      this.emit(CASCADE_METHOD_SUFFIXES.STREAM_CONFLICT_RESOLVED, {
+        stream_id: conflict.streamId,
+        conflict_id: conflictId,
+        resolution_method: 'abandoned',
+        resolved_by: options.agentId,
+        resolution_summary: options.reason,
+        metadata: options.metadata,
+      });
+    }
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -843,10 +933,16 @@ export class MultiAgentRepoTracker {
   // ─────────────────────────────────────────────────────────────────────────────
 
   /**
-   * Add a stream to the merge queue.
+   * Add a stream to the merge queue. Emits `x-cascade/queue.added`.
    */
   addToMergeQueue(options: mergeQueue.AddToQueueOptions): string {
-    return mergeQueue.addToQueue(this.db, options);
+    const entryId = mergeQueue.addToQueue(this.db, options);
+    this.emit(CASCADE_METHOD_SUFFIXES.QUEUE_ADDED, {
+      entry_id: entryId,
+      stream_id: options.streamId,
+      target_branch: options.targetBranch ?? 'main',
+    });
+    return entryId;
   }
 
   /**
@@ -867,24 +963,48 @@ export class MultiAgentRepoTracker {
   }
 
   /**
-   * Mark a queue entry as ready for merging.
+   * Mark a queue entry as ready for merging. Emits `x-cascade/queue.ready`.
    */
   markMergeQueueReady(entryId: string): void {
+    const entry = mergeQueue.getQueueEntry(this.db, entryId);
     mergeQueue.markReady(this.db, entryId);
+    if (entry) {
+      this.emit(CASCADE_METHOD_SUFFIXES.QUEUE_READY, {
+        entry_id: entryId,
+        stream_id: entry.streamId,
+        target_branch: entry.targetBranch,
+      });
+    }
   }
 
   /**
-   * Cancel a merge queue entry.
+   * Cancel a merge queue entry. Emits `x-cascade/queue.cancelled`.
    */
   cancelMergeQueueEntry(entryId: string): void {
+    const entry = mergeQueue.getQueueEntry(this.db, entryId);
     mergeQueue.cancelQueueEntry(this.db, entryId);
+    if (entry) {
+      this.emit(CASCADE_METHOD_SUFFIXES.QUEUE_CANCELLED, {
+        entry_id: entryId,
+        stream_id: entry.streamId,
+        target_branch: entry.targetBranch,
+      });
+    }
   }
 
   /**
-   * Remove an entry from the merge queue.
+   * Remove an entry from the merge queue. Emits `x-cascade/queue.removed`.
    */
   removeFromMergeQueue(entryId: string): void {
+    const entry = mergeQueue.getQueueEntry(this.db, entryId);
     mergeQueue.removeFromQueue(this.db, entryId);
+    if (entry) {
+      this.emit(CASCADE_METHOD_SUFFIXES.QUEUE_REMOVED, {
+        entry_id: entryId,
+        stream_id: entry.streamId,
+        target_branch: entry.targetBranch,
+      });
+    }
   }
 
   /**

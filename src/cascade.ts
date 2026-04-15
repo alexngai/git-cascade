@@ -547,8 +547,12 @@ function extractChangeId(message: string): string | undefined {
  * Change-Id trailer, first-line message summary, and files touched. Returns
  * an empty array if the range is empty or any git operation fails (this is
  * an observability step and must not break cascade progress).
+ *
+ * Exported so the tracker can use it from `syncWithParent` / `rebaseOntoStream`
+ * to emit individual `stream.committed` events for rebased commits in
+ * non-cascade flows.
  */
-function computeRebasedCommits(
+export function computeRebasedCommits(
   newBase: string,
   newHead: string,
   worktreePath: string

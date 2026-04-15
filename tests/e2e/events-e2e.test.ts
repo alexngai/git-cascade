@@ -273,6 +273,85 @@ describe('E2E: Cascade Event Emission', () => {
     }
   });
 
+  it('emits stream.committed per rebased commit when syncWithParent succeeds', () => {
+    const { emit, events } = createCapturingEmitter();
+    const tracker = new MultiAgentRepoTracker({
+      repoPath: testRepo.path,
+      emit,
+      skipRecovery: true,
+    });
+
+    try {
+      const agentA = 'agent-alpha';
+      const agentB = 'agent-beta';
+      const worktreeA = path.join(testRepo.path, '.worktrees', agentA);
+      const worktreeB = path.join(testRepo.path, '.worktrees', agentB);
+
+      // Parent stream with an initial commit.
+      const parentId = tracker.createStream({ name: 'parent-rebase', agentId: agentA });
+      tracker.createWorktree({
+        agentId: agentA,
+        path: worktreeA,
+        branch: `stream/${parentId}`,
+      });
+      fs.writeFileSync(path.join(worktreeA, 'base.txt'), 'base\n');
+      execSync('git add .', { cwd: worktreeA, stdio: 'pipe' });
+      tracker.commitChanges({
+        streamId: parentId,
+        agentId: agentA,
+        worktree: worktreeA,
+        message: 'base: init',
+      });
+
+      // Child stream forked from parent with its own commit.
+      const childId = tracker.forkStream({
+        parentStreamId: parentId,
+        name: 'child-rebase',
+        agentId: agentB,
+      });
+      tracker.createWorktree({
+        agentId: agentB,
+        path: worktreeB,
+        branch: `stream/${childId}`,
+      });
+      fs.writeFileSync(path.join(worktreeB, 'child.txt'), 'child\n');
+      execSync('git add .', { cwd: worktreeB, stdio: 'pipe' });
+      tracker.commitChanges({
+        streamId: childId,
+        agentId: agentB,
+        worktree: worktreeB,
+        message: 'feat: child commit',
+      });
+
+      // Parent advances with a non-conflicting commit.
+      fs.writeFileSync(path.join(worktreeA, 'parent2.txt'), 'p2\n');
+      execSync('git add .', { cwd: worktreeA, stdio: 'pipe' });
+      tracker.commitChanges({
+        streamId: parentId,
+        agentId: agentA,
+        worktree: worktreeA,
+        message: 'parent: advance',
+      });
+
+      events.length = 0;
+      // Direct sync (NOT cascade) — should produce stream.committed for the
+      // rebased child commit, closing the Phase 0 gap.
+      const result = tracker.syncWithParent(childId, agentB, worktreeB, 'abort');
+      expect(result.success).toBe(true);
+
+      const committed = eventsOfType(events, CASCADE_METHODS.STREAM_COMMITTED);
+      expect(committed.length).toBeGreaterThanOrEqual(1);
+      const lastCommit = committed[committed.length - 1].params as StreamCommittedParams;
+      expect(lastCommit.stream_id).toBe(childId);
+      expect(lastCommit.message_summary).toContain('feat: child commit');
+      expect(lastCommit.metadata).toMatchObject({ rebased: true, rebase_source: 'sync' });
+      // Each rebased commit carries a Change-Id (preserved across the rebase).
+      expect(lastCommit.change_id).toBeTruthy();
+    } finally {
+      tracker.close();
+    }
+  });
+
   it('emits cascade.rebased per dependent + cascade.completed with the walk summary', () => {
     const { emit, events } = createCapturingEmitter();
     const tracker = new MultiAgentRepoTracker({

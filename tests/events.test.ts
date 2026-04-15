@@ -291,6 +291,78 @@ describe('cascade event emission', () => {
     });
   });
 
+  describe('stream.conflict_resolved', () => {
+    it('fires when resolveConflict is called via the tracker', () => {
+      const { emit, events } = createCapturingEmitter();
+      const tracker = new MultiAgentRepoTracker({ repoPath: testRepo.path, emit });
+      try {
+        const streamId = tracker.createStream({ name: 'cf', agentId: 'a' });
+        const conflictId = tracker.createConflict({
+          streamId,
+          conflictingCommit: 'aa',
+          targetCommit: 'bb',
+          conflictedFiles: ['x.ts'],
+        });
+        events.length = 0;
+
+        tracker.resolveConflict(conflictId, {
+          method: 'ours',
+          resolvedBy: 'agent-x',
+          details: 'kept ours after review',
+        });
+
+        const resolved = events.find(
+          (e) => e.method === CASCADE_METHODS.STREAM_CONFLICT_RESOLVED
+        );
+        expect(resolved).toBeDefined();
+        const params = resolved!.params as {
+          stream_id: string;
+          conflict_id: string;
+          resolution_method: string;
+          resolved_by?: string;
+        };
+        expect(params.stream_id).toBe(streamId);
+        expect(params.conflict_id).toBe(conflictId);
+        expect(params.resolution_method).toBe('ours');
+        expect(params.resolved_by).toBe('agent-x');
+      } finally {
+        tracker.close();
+      }
+    });
+
+    it('fires from abandonConflict with resolution_method=abandoned', () => {
+      const { emit, events } = createCapturingEmitter();
+      const tracker = new MultiAgentRepoTracker({ repoPath: testRepo.path, emit });
+      try {
+        const streamId = tracker.createStream({ name: 'cf2', agentId: 'a' });
+        const conflictId = tracker.createConflict({
+          streamId,
+          conflictingCommit: 'aa',
+          targetCommit: 'bb',
+          conflictedFiles: ['y.ts'],
+        });
+        events.length = 0;
+
+        tracker.abandonConflict(conflictId, { agentId: 'agent-x', reason: 'gave up' });
+
+        const resolved = events.find(
+          (e) => e.method === CASCADE_METHODS.STREAM_CONFLICT_RESOLVED
+        );
+        expect(resolved).toBeDefined();
+        const params = resolved!.params as {
+          resolution_method: string;
+          resolved_by?: string;
+          resolution_summary?: string;
+        };
+        expect(params.resolution_method).toBe('abandoned');
+        expect(params.resolved_by).toBe('agent-x');
+        expect(params.resolution_summary).toBe('gave up');
+      } finally {
+        tracker.close();
+      }
+    });
+  });
+
   describe('cascade.completed (no dependents)', () => {
     it('fires cascade.completed with empty results when root has no dependents', () => {
       const { emit, events } = createCapturingEmitter();

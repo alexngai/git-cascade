@@ -1,6 +1,6 @@
 {
   "name": "git-cascade",
-  "version": "0.0.4",
+  "version": "0.0.7",
   "description": "Multi-agent git tracking system for coordinating AI agents on shared codebases",
   "type": "module",
   "main": "./dist/index.js",

@@ -72,9 +72,15 @@ export const CASCADE_METHOD_SUFFIXES = {
   STREAM_COMMITTED: 'stream.committed',
   STREAM_MERGED: 'stream.merged',
   STREAM_CONFLICTED: 'stream.conflicted',
+  STREAM_CONFLICT_RESOLVED: 'stream.conflict_resolved',
   STREAM_ABANDONED: 'stream.abandoned',
+  STREAM_PUSHED: 'stream.pushed',
   CASCADE_REBASED: 'cascade.rebased',
   CASCADE_COMPLETED: 'cascade.completed',
+  QUEUE_ADDED: 'queue.added',
+  QUEUE_READY: 'queue.ready',
+  QUEUE_CANCELLED: 'queue.cancelled',
+  QUEUE_REMOVED: 'queue.removed',
 } as const;
 
 export type CascadeMethodSuffix =
@@ -98,9 +104,15 @@ export const CASCADE_METHODS = {
   STREAM_COMMITTED: `${DEFAULT_CASCADE_PREFIX}/${CASCADE_METHOD_SUFFIXES.STREAM_COMMITTED}`,
   STREAM_MERGED: `${DEFAULT_CASCADE_PREFIX}/${CASCADE_METHOD_SUFFIXES.STREAM_MERGED}`,
   STREAM_CONFLICTED: `${DEFAULT_CASCADE_PREFIX}/${CASCADE_METHOD_SUFFIXES.STREAM_CONFLICTED}`,
+  STREAM_CONFLICT_RESOLVED: `${DEFAULT_CASCADE_PREFIX}/${CASCADE_METHOD_SUFFIXES.STREAM_CONFLICT_RESOLVED}`,
   STREAM_ABANDONED: `${DEFAULT_CASCADE_PREFIX}/${CASCADE_METHOD_SUFFIXES.STREAM_ABANDONED}`,
+  STREAM_PUSHED: `${DEFAULT_CASCADE_PREFIX}/${CASCADE_METHOD_SUFFIXES.STREAM_PUSHED}`,
   CASCADE_REBASED: `${DEFAULT_CASCADE_PREFIX}/${CASCADE_METHOD_SUFFIXES.CASCADE_REBASED}`,
   CASCADE_COMPLETED: `${DEFAULT_CASCADE_PREFIX}/${CASCADE_METHOD_SUFFIXES.CASCADE_COMPLETED}`,
+  QUEUE_ADDED: `${DEFAULT_CASCADE_PREFIX}/${CASCADE_METHOD_SUFFIXES.QUEUE_ADDED}`,
+  QUEUE_READY: `${DEFAULT_CASCADE_PREFIX}/${CASCADE_METHOD_SUFFIXES.QUEUE_READY}`,
+  QUEUE_CANCELLED: `${DEFAULT_CASCADE_PREFIX}/${CASCADE_METHOD_SUFFIXES.QUEUE_CANCELLED}`,
+  QUEUE_REMOVED: `${DEFAULT_CASCADE_PREFIX}/${CASCADE_METHOD_SUFFIXES.QUEUE_REMOVED}`,
 } as const;
 
 export type CascadeMethod = (typeof CASCADE_METHODS)[keyof typeof CASCADE_METHODS];
@@ -125,18 +137,30 @@ export function buildCascadeMethods(prefix: string): {
   STREAM_COMMITTED: string;
   STREAM_MERGED: string;
   STREAM_CONFLICTED: string;
+  STREAM_CONFLICT_RESOLVED: string;
   STREAM_ABANDONED: string;
+  STREAM_PUSHED: string;
   CASCADE_REBASED: string;
   CASCADE_COMPLETED: string;
+  QUEUE_ADDED: string;
+  QUEUE_READY: string;
+  QUEUE_CANCELLED: string;
+  QUEUE_REMOVED: string;
 } {
   return {
     STREAM_OPENED: `${prefix}/${CASCADE_METHOD_SUFFIXES.STREAM_OPENED}`,
     STREAM_COMMITTED: `${prefix}/${CASCADE_METHOD_SUFFIXES.STREAM_COMMITTED}`,
     STREAM_MERGED: `${prefix}/${CASCADE_METHOD_SUFFIXES.STREAM_MERGED}`,
     STREAM_CONFLICTED: `${prefix}/${CASCADE_METHOD_SUFFIXES.STREAM_CONFLICTED}`,
+    STREAM_CONFLICT_RESOLVED: `${prefix}/${CASCADE_METHOD_SUFFIXES.STREAM_CONFLICT_RESOLVED}`,
     STREAM_ABANDONED: `${prefix}/${CASCADE_METHOD_SUFFIXES.STREAM_ABANDONED}`,
+    STREAM_PUSHED: `${prefix}/${CASCADE_METHOD_SUFFIXES.STREAM_PUSHED}`,
     CASCADE_REBASED: `${prefix}/${CASCADE_METHOD_SUFFIXES.CASCADE_REBASED}`,
     CASCADE_COMPLETED: `${prefix}/${CASCADE_METHOD_SUFFIXES.CASCADE_COMPLETED}`,
+    QUEUE_ADDED: `${prefix}/${CASCADE_METHOD_SUFFIXES.QUEUE_ADDED}`,
+    QUEUE_READY: `${prefix}/${CASCADE_METHOD_SUFFIXES.QUEUE_READY}`,
+    QUEUE_CANCELLED: `${prefix}/${CASCADE_METHOD_SUFFIXES.QUEUE_CANCELLED}`,
+    QUEUE_REMOVED: `${prefix}/${CASCADE_METHOD_SUFFIXES.QUEUE_REMOVED}`,
   };
 }
 
@@ -264,6 +288,63 @@ export interface StreamConflictedParams {
   metadata?: EventMetadata;
 }
 
+/**
+ * Fired when a stream's commits are pushed to a remote (trunk-style flows
+ * via `direct-push` / `optimistic-push` landing strategies). Distinct from
+ * `stream.merged` because the target isn't a tracked stream.
+ */
+export interface StreamPushedParams {
+  /** Stream whose head was pushed */
+  stream_id: string;
+  /** Agent that did the push */
+  agent_id: string;
+  /** Commit hash at the head when push completed */
+  pushed_commit: string;
+  /** Remote name (typically 'origin') */
+  remote: string;
+  /** Remote ref pushed to (e.g., 'main', 'refs/heads/feature-x') */
+  remote_ref: string;
+  /** Strategy that drove the push ('direct-push' | 'optimistic-push' | etc.) */
+  strategy?: string;
+  /** Caller metadata */
+  metadata?: EventMetadata;
+}
+
+export interface QueueEntryBase {
+  /** Merge queue entry id */
+  entry_id: string;
+  /** Stream queued for merge */
+  stream_id: string;
+  /** Target branch for the merge (e.g., 'main') */
+  target_branch: string;
+  /** Caller metadata */
+  metadata?: EventMetadata;
+}
+
+/** Fired when a stream is added to the merge queue. */
+export type QueueAddedParams = QueueEntryBase;
+/** Fired when a queued entry is marked ready to merge. */
+export type QueueReadyParams = QueueEntryBase;
+/** Fired when a queued entry is cancelled (operator decision). */
+export type QueueCancelledParams = QueueEntryBase & { reason?: string };
+/** Fired when a queued entry is removed (after merge or cleanup). */
+export type QueueRemovedParams = QueueEntryBase & { outcome?: string };
+
+export interface StreamConflictResolvedParams {
+  /** Stream whose conflict was resolved */
+  stream_id: string;
+  /** Conflict record id that was resolved */
+  conflict_id: string;
+  /** How the conflict was resolved (ours/theirs/manual/agent/abandoned/auto-resolve/spawn-resolver) */
+  resolution_method: string;
+  /** Agent or human that performed the resolution */
+  resolved_by?: string;
+  /** Optional human-readable summary of what was resolved */
+  resolution_summary?: string;
+  /** Caller metadata */
+  metadata?: EventMetadata;
+}
+
 export interface StreamAbandonedParams {
   /** Stream that was abandoned */
   stream_id: string;
@@ -358,9 +439,15 @@ export interface CascadeSuffixMap {
   'stream.committed': StreamCommittedParams;
   'stream.merged': StreamMergedParams;
   'stream.conflicted': StreamConflictedParams;
+  'stream.conflict_resolved': StreamConflictResolvedParams;
   'stream.abandoned': StreamAbandonedParams;
+  'stream.pushed': StreamPushedParams;
   'cascade.rebased': CascadeRebasedParams;
   'cascade.completed': CascadeCompletedParams;
+  'queue.added': QueueAddedParams;
+  'queue.ready': QueueReadyParams;
+  'queue.cancelled': QueueCancelledParams;
+  'queue.removed': QueueRemovedParams;
 }
 
 /**
@@ -373,9 +460,15 @@ export interface CascadeMethodMap {
   'x-cascade/stream.committed': StreamCommittedParams;
   'x-cascade/stream.merged': StreamMergedParams;
   'x-cascade/stream.conflicted': StreamConflictedParams;
+  'x-cascade/stream.conflict_resolved': StreamConflictResolvedParams;
   'x-cascade/stream.abandoned': StreamAbandonedParams;
+  'x-cascade/stream.pushed': StreamPushedParams;
   'x-cascade/cascade.rebased': CascadeRebasedParams;
   'x-cascade/cascade.completed': CascadeCompletedParams;
+  'x-cascade/queue.added': QueueAddedParams;
+  'x-cascade/queue.ready': QueueReadyParams;
+  'x-cascade/queue.cancelled': QueueCancelledParams;
+  'x-cascade/queue.removed': QueueRemovedParams;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
