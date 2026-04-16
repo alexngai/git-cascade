@@ -5,6 +5,7 @@
  */
 
 import type { WorkerTask } from './task.js';
+import type { EventMetadata } from '../events/index.js';
 
 export type StreamStatus = 'active' | 'paused' | 'merged' | 'abandoned' | 'conflicted';
 
@@ -82,6 +83,14 @@ export interface MergeStreamOptions {
   agentId: string;
   worktree: string;
   strategy?: MergeStrategy;
+  /**
+   * Free-form metadata threaded into the `x-cascade/stream.merged` event.
+   * Useful for binding a merge to a task via `{ task_ref: { resource_id,
+   * node_id } }` — e.g., a release-coordinator merging multiple feature
+   * streams under a single release task_ref. Not persisted in the tracker
+   * DB; consumed only by the emit hook.
+   */
+  metadata?: EventMetadata;
 }
 
 /**

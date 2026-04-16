@@ -270,6 +270,7 @@ export class MultiAgentRepoTracker {
         agent_id: options.agentId,
         strategy: options.strategy ?? 'merge-commit',
         source_commit: sourceCommit,
+        metadata: options.metadata,
       });
     } else if (!result.success && result.conflicts && result.conflicts.length > 0) {
       this.emit(CASCADE_METHOD_SUFFIXES.STREAM_CONFLICTED, {
@@ -277,6 +278,7 @@ export class MultiAgentRepoTracker {
         conflicted_files: result.conflicts,
         agent_id: options.agentId,
         source: 'merge',
+        metadata: options.metadata,
       });
     }
     return result;
@@ -355,14 +357,42 @@ export class MultiAgentRepoTracker {
 
   rollbackToOperation(options: RollbackToOperationOptions): void {
     rollback.rollbackToOperation(this.db, this.repoPath, options);
+    this.emitRolledBack(options.streamId, 'to_operation', options.operationId);
   }
 
   rollbackN(options: RollbackNOptions): void {
     rollback.rollbackN(this.db, this.repoPath, options);
+    this.emitRolledBack(options.streamId, 'n_operations', options.n);
   }
 
   rollbackToForkPoint(options: RollbackToForkPointOptions): void {
     rollback.rollbackToForkPoint(this.db, this.repoPath, options);
+    this.emitRolledBack(options.streamId, 'to_fork_point');
+  }
+
+  /**
+   * Shared emit helper for the three rollback flavors. Best-effort reads the
+   * post-rollback HEAD so the hub can correlate the event with git state;
+   * swallows read failures since the rollback itself already succeeded.
+   */
+  private emitRolledBack(
+    streamId: string,
+    strategy: 'to_operation' | 'n_operations' | 'to_fork_point',
+    target?: string | number,
+  ): void {
+    let newHead: string | undefined;
+    try {
+      newHead = streams.getStreamHead(this.db, this.repoPath, streamId);
+    } catch {
+      // Post-rollback HEAD not resolvable (rare — perhaps stream deleted
+      // concurrently). Emit without it.
+    }
+    this.emit(CASCADE_METHOD_SUFFIXES.STREAM_ROLLED_BACK, {
+      stream_id: streamId,
+      strategy,
+      target,
+      new_head: newHead,
+    });
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -727,14 +757,21 @@ export class MultiAgentRepoTracker {
    * Paused streams cannot have commits made to them until resumed.
    */
   pauseStream(streamId: string, reason?: string): void {
-    return streams.pauseStream(this.db, streamId, reason);
+    streams.pauseStream(this.db, streamId, reason);
+    this.emit(CASCADE_METHOD_SUFFIXES.STREAM_PAUSED, {
+      stream_id: streamId,
+      reason,
+    });
   }
 
   /**
    * Resume a paused stream.
    */
   resumeStream(streamId: string): void {
-    return streams.resumeStream(this.db, streamId);
+    streams.resumeStream(this.db, streamId);
+    this.emit(CASCADE_METHOD_SUFFIXES.STREAM_RESUMED, {
+      stream_id: streamId,
+    });
   }
 
   // ─────────────────────────────────────────────────────────────────────────────

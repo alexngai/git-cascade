@@ -199,6 +199,128 @@ describe('cascade event emission', () => {
     });
   });
 
+  describe('stream.paused / stream.resumed', () => {
+    it('fires stream.paused with the supplied reason', () => {
+      const { emit, events } = createCapturingEmitter();
+      const tracker = new MultiAgentRepoTracker({ repoPath: testRepo.path, emit });
+      try {
+        const streamId = tracker.createStream({ name: 'pausable', agentId: 'agent-1' });
+        events.length = 0;
+        tracker.pauseStream(streamId, 'holding for review');
+
+        const paused = events.find((e) => e.method === CASCADE_METHODS.STREAM_PAUSED);
+        expect(paused).toBeDefined();
+        expect(paused!.params).toMatchObject({
+          stream_id: streamId,
+          reason: 'holding for review',
+        });
+      } finally {
+        tracker.close();
+      }
+    });
+
+    it('fires stream.resumed', () => {
+      const { emit, events } = createCapturingEmitter();
+      const tracker = new MultiAgentRepoTracker({ repoPath: testRepo.path, emit });
+      try {
+        const streamId = tracker.createStream({ name: 'pausable-2', agentId: 'agent-1' });
+        tracker.pauseStream(streamId, 'reason');
+        events.length = 0;
+        tracker.resumeStream(streamId);
+
+        const resumed = events.find((e) => e.method === CASCADE_METHODS.STREAM_RESUMED);
+        expect(resumed).toBeDefined();
+        expect(resumed!.params).toMatchObject({ stream_id: streamId });
+      } finally {
+        tracker.close();
+      }
+    });
+  });
+
+  describe('stream.rolled_back', () => {
+    // Uses manual recordOperation with parentOps links (same pattern as
+    // rollback.test.ts) because tracker.commitChanges doesn't wire parentOps
+    // today — so rollbackN can't walk the chain from commit-recorded ops.
+    // Pre-existing issue unrelated to E1; tracked separately.
+    function makeCommittedOps(
+      tracker: MultiAgentRepoTracker,
+      streamId: string,
+      wt: string,
+      count: number,
+    ): { commits: string[]; ops: string[] } {
+      const commits: string[] = [];
+      const ops: string[] = [];
+      for (let i = 1; i <= count; i++) {
+        fs.writeFileSync(path.join(wt, `rb-${i}.txt`), `content ${i}`);
+        execSync('git add .', { cwd: wt, stdio: 'pipe' });
+        execSync(`git commit -m "commit ${i}"`, { cwd: wt, stdio: 'pipe' });
+        const commit = execSync('git rev-parse HEAD', {
+          cwd: wt,
+          encoding: 'utf-8',
+        }).trim();
+        commits.push(commit);
+        const op = tracker.recordOperation({
+          streamId,
+          agentId: 'agent-1',
+          opType: 'commit',
+          beforeState: commits[i - 2] ?? commit,
+          afterState: commit,
+          parentOps: ops[i - 2] ? [ops[i - 2]!] : undefined,
+        });
+        ops.push(op);
+      }
+      return { commits, ops };
+    }
+
+    it('fires from rollbackN with strategy="n_operations" and the new HEAD', () => {
+      const { emit, events } = createCapturingEmitter();
+      const tracker = new MultiAgentRepoTracker({ repoPath: testRepo.path, emit });
+      try {
+        const streamId = tracker.createStream({ name: 'rollback-n', agentId: 'agent-1' });
+        const wt = setupWorktree(testRepo.path, 'agent-rb', `stream/${streamId}`);
+        const { commits } = makeCommittedOps(tracker, streamId, wt, 3);
+        events.length = 0;
+
+        tracker.rollbackN({ streamId, n: 2, worktreePath: wt });
+
+        const rolled = events.find((e) => e.method === CASCADE_METHODS.STREAM_ROLLED_BACK);
+        expect(rolled).toBeDefined();
+        expect(rolled!.params).toMatchObject({
+          stream_id: streamId,
+          strategy: 'n_operations',
+          target: 2,
+        });
+        expect((rolled!.params as { new_head?: string }).new_head).toBe(commits[0]);
+      } finally {
+        tracker.close();
+      }
+    });
+
+    it('fires from rollbackToOperation with the operation id as target', () => {
+      const { emit, events } = createCapturingEmitter();
+      const tracker = new MultiAgentRepoTracker({ repoPath: testRepo.path, emit });
+      try {
+        const streamId = tracker.createStream({ name: 'rollback-to-op', agentId: 'agent-1' });
+        const wt = setupWorktree(testRepo.path, 'agent-rb-op', `stream/${streamId}`);
+        const { ops } = makeCommittedOps(tracker, streamId, wt, 2);
+        const firstOpId = ops[0];
+        events.length = 0;
+
+        tracker.rollbackToOperation({ streamId, operationId: firstOpId, worktreePath: wt });
+
+        const rolled = events.find((e) => e.method === CASCADE_METHODS.STREAM_ROLLED_BACK);
+        expect(rolled).toBeDefined();
+        expect(rolled!.params).toMatchObject({
+          stream_id: streamId,
+          strategy: 'to_operation',
+          target: firstOpId,
+        });
+      } finally {
+        tracker.close();
+      }
+    });
+  });
+
   describe('stream.merged', () => {
     it('fires after a successful mergeStream with strategy and source_commit', () => {
       const { emit, events } = createCapturingEmitter();
@@ -237,6 +359,108 @@ describe('cascade event emission', () => {
           expect(params.agent_id).toBe('agent-2');
           expect(params.strategy).toBe('merge-commit');
           expect(params.source_commit).toBeTruthy();
+        }
+      } finally {
+        tracker.close();
+      }
+    });
+
+    it('threads options.metadata into the emitted stream.merged params', () => {
+      const { emit, events } = createCapturingEmitter();
+      const tracker = new MultiAgentRepoTracker({ repoPath: testRepo.path, emit });
+      try {
+        const targetId = tracker.createStream({ name: 'main-feat-m', agentId: 'agent-1' });
+        const sourceId = tracker.forkStream({
+          parentStreamId: targetId,
+          name: 'sub-feat-m',
+          agentId: 'agent-2',
+        });
+        const wt = setupWorktree(testRepo.path, 'agent-m', `stream/${sourceId}`);
+        writeFile(wt, 'm.txt', 'm');
+        tracker.commitChanges({
+          streamId: sourceId,
+          agentId: 'agent-2',
+          worktree: wt,
+          message: 'feat: m',
+        });
+
+        events.length = 0;
+        const taskRef = { resource_id: 'res-merge-md', node_id: 'task-merge-md' };
+        const result = tracker.mergeStream({
+          sourceStream: sourceId,
+          targetStream: targetId,
+          agentId: 'agent-2',
+          worktree: wt,
+          metadata: { task_ref: taskRef, release: 'v1.2.3' },
+        });
+
+        if (result.success) {
+          const merged = events.find((e) => e.method === CASCADE_METHODS.STREAM_MERGED);
+          expect(merged).toBeDefined();
+          const params = merged!.params as StreamMergedParams;
+          expect(params.metadata).toBeDefined();
+          expect(params.metadata?.task_ref).toEqual(taskRef);
+          expect(params.metadata?.release).toBe('v1.2.3');
+        }
+      } finally {
+        tracker.close();
+      }
+    });
+
+    it('forwards options.metadata on the stream.conflicted emit when a merge conflicts', () => {
+      const { emit, events } = createCapturingEmitter();
+      const tracker = new MultiAgentRepoTracker({ repoPath: testRepo.path, emit });
+      try {
+        // Set up divergent work that will conflict on merge.
+        const target = tracker.createStream({ name: 'main-cf', agentId: 'agent-1' });
+        const wtMain = setupWorktree(testRepo.path, 'agent-main-cf', `stream/${target}`);
+        writeFile(wtMain, 'shared.txt', 'from-main\n');
+        tracker.commitChanges({
+          streamId: target,
+          agentId: 'agent-1',
+          worktree: wtMain,
+          message: 'main: add shared',
+        });
+
+        const source = tracker.forkStream({
+          parentStreamId: target,
+          name: 'feat-cf',
+          agentId: 'agent-2',
+        });
+        const wtFeat = setupWorktree(testRepo.path, 'agent-feat-cf', `stream/${source}`);
+        writeFile(wtFeat, 'shared.txt', 'from-feat\n');
+        tracker.commitChanges({
+          streamId: source,
+          agentId: 'agent-2',
+          worktree: wtFeat,
+          message: 'feat: overwrite shared',
+        });
+        // Advance main so the merge direction creates a real conflict.
+        writeFile(wtMain, 'shared.txt', 'from-main-advanced\n');
+        tracker.commitChanges({
+          streamId: target,
+          agentId: 'agent-1',
+          worktree: wtMain,
+          message: 'main: advance',
+        });
+
+        events.length = 0;
+        const result = tracker.mergeStream({
+          sourceStream: source,
+          targetStream: target,
+          agentId: 'agent-2',
+          worktree: wtMain,
+          metadata: { task_ref: { resource_id: 'res-cf', node_id: 'task-cf' } },
+        });
+
+        if (!result.success && result.conflicts && result.conflicts.length > 0) {
+          const conflicted = events.find(
+            (e) => e.method === CASCADE_METHODS.STREAM_CONFLICTED,
+          );
+          expect(conflicted).toBeDefined();
+          expect(
+            (conflicted!.params as { metadata?: { task_ref?: unknown } }).metadata?.task_ref,
+          ).toEqual({ resource_id: 'res-cf', node_id: 'task-cf' });
         }
       } finally {
         tracker.close();

@@ -74,6 +74,9 @@ export const CASCADE_METHOD_SUFFIXES = {
   STREAM_CONFLICTED: 'stream.conflicted',
   STREAM_CONFLICT_RESOLVED: 'stream.conflict_resolved',
   STREAM_ABANDONED: 'stream.abandoned',
+  STREAM_PAUSED: 'stream.paused',
+  STREAM_RESUMED: 'stream.resumed',
+  STREAM_ROLLED_BACK: 'stream.rolled_back',
   STREAM_PUSHED: 'stream.pushed',
   CASCADE_REBASED: 'cascade.rebased',
   CASCADE_COMPLETED: 'cascade.completed',
@@ -106,6 +109,9 @@ export const CASCADE_METHODS = {
   STREAM_CONFLICTED: `${DEFAULT_CASCADE_PREFIX}/${CASCADE_METHOD_SUFFIXES.STREAM_CONFLICTED}`,
   STREAM_CONFLICT_RESOLVED: `${DEFAULT_CASCADE_PREFIX}/${CASCADE_METHOD_SUFFIXES.STREAM_CONFLICT_RESOLVED}`,
   STREAM_ABANDONED: `${DEFAULT_CASCADE_PREFIX}/${CASCADE_METHOD_SUFFIXES.STREAM_ABANDONED}`,
+  STREAM_PAUSED: `${DEFAULT_CASCADE_PREFIX}/${CASCADE_METHOD_SUFFIXES.STREAM_PAUSED}`,
+  STREAM_RESUMED: `${DEFAULT_CASCADE_PREFIX}/${CASCADE_METHOD_SUFFIXES.STREAM_RESUMED}`,
+  STREAM_ROLLED_BACK: `${DEFAULT_CASCADE_PREFIX}/${CASCADE_METHOD_SUFFIXES.STREAM_ROLLED_BACK}`,
   STREAM_PUSHED: `${DEFAULT_CASCADE_PREFIX}/${CASCADE_METHOD_SUFFIXES.STREAM_PUSHED}`,
   CASCADE_REBASED: `${DEFAULT_CASCADE_PREFIX}/${CASCADE_METHOD_SUFFIXES.CASCADE_REBASED}`,
   CASCADE_COMPLETED: `${DEFAULT_CASCADE_PREFIX}/${CASCADE_METHOD_SUFFIXES.CASCADE_COMPLETED}`,
@@ -139,6 +145,9 @@ export function buildCascadeMethods(prefix: string): {
   STREAM_CONFLICTED: string;
   STREAM_CONFLICT_RESOLVED: string;
   STREAM_ABANDONED: string;
+  STREAM_PAUSED: string;
+  STREAM_RESUMED: string;
+  STREAM_ROLLED_BACK: string;
   STREAM_PUSHED: string;
   CASCADE_REBASED: string;
   CASCADE_COMPLETED: string;
@@ -154,6 +163,9 @@ export function buildCascadeMethods(prefix: string): {
     STREAM_CONFLICTED: `${prefix}/${CASCADE_METHOD_SUFFIXES.STREAM_CONFLICTED}`,
     STREAM_CONFLICT_RESOLVED: `${prefix}/${CASCADE_METHOD_SUFFIXES.STREAM_CONFLICT_RESOLVED}`,
     STREAM_ABANDONED: `${prefix}/${CASCADE_METHOD_SUFFIXES.STREAM_ABANDONED}`,
+    STREAM_PAUSED: `${prefix}/${CASCADE_METHOD_SUFFIXES.STREAM_PAUSED}`,
+    STREAM_RESUMED: `${prefix}/${CASCADE_METHOD_SUFFIXES.STREAM_RESUMED}`,
+    STREAM_ROLLED_BACK: `${prefix}/${CASCADE_METHOD_SUFFIXES.STREAM_ROLLED_BACK}`,
     STREAM_PUSHED: `${prefix}/${CASCADE_METHOD_SUFFIXES.STREAM_PUSHED}`,
     CASCADE_REBASED: `${prefix}/${CASCADE_METHOD_SUFFIXES.CASCADE_REBASED}`,
     CASCADE_COMPLETED: `${prefix}/${CASCADE_METHOD_SUFFIXES.CASCADE_COMPLETED}`,
@@ -357,6 +369,62 @@ export interface StreamAbandonedParams {
 }
 
 /**
+ * Stream paused — work on the stream is temporarily halted. Commits against
+ * a paused stream are rejected until `resumeStream` is called. The pause is
+ * metadata only; no git state changes.
+ */
+export interface StreamPausedParams {
+  /** Stream that was paused */
+  stream_id: string;
+  /** Agent that paused the stream */
+  agent_id?: string;
+  /** Human-readable reason for the pause (if supplied by the caller) */
+  reason?: string;
+  /** Caller metadata */
+  metadata?: EventMetadata;
+}
+
+/**
+ * Stream resumed — previously paused stream is unblocked for further work.
+ */
+export interface StreamResumedParams {
+  /** Stream that was resumed */
+  stream_id: string;
+  /** Agent that resumed the stream */
+  agent_id?: string;
+  /** Caller metadata */
+  metadata?: EventMetadata;
+}
+
+/**
+ * Stream rolled back — the stream's HEAD was moved backward to undo one or
+ * more operations. Emitted from all three rollback flavors (to_operation,
+ * n_operations, to_fork_point); `strategy` discriminates which was used.
+ *
+ * Observability-only on the hub side — the tracker's operation log remains
+ * authoritative for the rollback audit trail.
+ */
+export interface StreamRolledBackParams {
+  /** Stream that was rolled back */
+  stream_id: string;
+  /** Agent that performed the rollback, when known */
+  agent_id?: string;
+  /** Which rollback flavor was used */
+  strategy: 'to_operation' | 'n_operations' | 'to_fork_point';
+  /**
+   * Strategy-specific target descriptor:
+   *   - to_operation: the operation_id rolled back to
+   *   - n_operations: the number of operations undone
+   *   - to_fork_point: omitted (semantic: back to the stream's fork point)
+   */
+  target?: string | number;
+  /** Resulting HEAD commit after the rollback */
+  new_head?: string;
+  /** Caller metadata */
+  metadata?: EventMetadata;
+}
+
+/**
  * A single commit produced by a cascade rebase operation. Shape is a subset
  * of StreamCommittedParams — the hub can record these via the same code path.
  */
@@ -441,6 +509,9 @@ export interface CascadeSuffixMap {
   'stream.conflicted': StreamConflictedParams;
   'stream.conflict_resolved': StreamConflictResolvedParams;
   'stream.abandoned': StreamAbandonedParams;
+  'stream.paused': StreamPausedParams;
+  'stream.resumed': StreamResumedParams;
+  'stream.rolled_back': StreamRolledBackParams;
   'stream.pushed': StreamPushedParams;
   'cascade.rebased': CascadeRebasedParams;
   'cascade.completed': CascadeCompletedParams;
@@ -462,6 +533,9 @@ export interface CascadeMethodMap {
   'x-cascade/stream.conflicted': StreamConflictedParams;
   'x-cascade/stream.conflict_resolved': StreamConflictResolvedParams;
   'x-cascade/stream.abandoned': StreamAbandonedParams;
+  'x-cascade/stream.paused': StreamPausedParams;
+  'x-cascade/stream.resumed': StreamResumedParams;
+  'x-cascade/stream.rolled_back': StreamRolledBackParams;
   'x-cascade/stream.pushed': StreamPushedParams;
   'x-cascade/cascade.rebased': CascadeRebasedParams;
   'x-cascade/cascade.completed': CascadeCompletedParams;
