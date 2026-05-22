@@ -88,6 +88,20 @@ src/
 - **Fire-and-forget:** Emits fire synchronously after the corresponding DB write, before the tracker method returns. Exceptions in the callback are caught and discarded. No emitter = no runtime cost beyond a single null check.
 - **Key exports:** `CASCADE_METHODS` (default-prefixed names), `CASCADE_METHOD_SUFFIXES` (canonical suffixes), `buildCascadeMethods(prefix)`, `matchCascadeSuffix(method)`, `CascadeEmitter`, payload types (`StreamOpenedParams`, etc.), and `CascadeCapability` — the `cascade` capability-block schema a participant advertises to a coordination hub (`canServeDiff` / `canAct` / `emitsConflicts` / `autoCloseOnMerge`).
 
+### Diff RPC schema (`src/diff-rpc/index.ts`)
+- **What:** Hub ↔ sidecar on-demand unified diff fetch — passive types + method-name constants. No runtime, no transport. Same schema-namespace rationale as the events module: hubs and sidecars share these shapes so the source-of-truth must be the published package.
+- **Wire methods:** `cascade/diff.request` (hub → sidecar), `cascade/diff.response` (sidecar → hub, inline or streaming announcement), `cascade/diff.chunk` (sidecar → hub, post-streaming follow-ups).
+- **Key exports:** `CASCADE_DIFF_METHODS`, `CASCADE_DIFF_METHOD_SET`, `CascadeDiffMethod`, tuning constants (`DIFF_INLINE_THRESHOLD_BYTES`, `DIFF_CHUNK_SIZE_BYTES`, `DIFF_REQUEST_TIMEOUT_MS`, `DIFF_MAX_RAW_BYTES`), payload types (`CascadeDiffRequestParams`, `CascadeDiffInlineResponse`, `CascadeDiffStreamingResponse`, `CascadeDiffErrorResponse`, `CascadeDiffResponseParams`, `CascadeDiffChunkParams`), method-keyed type map (`CascadeDiffMethodMap`), type guards (`isInlineResponse`, `isStreamingResponse`, `isErrorResponse`), and the hub-side resolver helper shapes (`DiffPayload`, `DiffErrorCode`, `DiffError`, `DiffResult`).
+- **Subpath export:** `git-cascade/diff-rpc` (in addition to the main barrel).
+
+### Action RPC schema (`src/action-rpc/index.ts`)
+- **What:** Hub → sidecar command channel for cascade operations — passive types + method-name constants. The complement to the `x-cascade/stream.*` event vocabulary: events flow runtime → hub ("here is what happened"), action requests flow hub → runtime ("please do this"). Fire-and-forget; the resulting `x-cascade/stream.*` event provides observability.
+- **Wire methods:** `x-cascade/request.merge`, `x-cascade/request.abandon`, `x-cascade/request.pause`, `x-cascade/request.resume`, `x-cascade/request.resolve`, `x-cascade/request.push`, `x-cascade/request.commit`.
+- **Capability gating:** A hub should only send these when the sidecar declares `cascade.canAct: true` on its `CascadeCapability` block (see events module). Sending to a `canAct: false` participant silently no-ops.
+- **Key exports:** `CASCADE_ACTION_METHODS` (action-keyed record), `CASCADE_ACTION_METHOD_SET`, `CascadeAction` (action-name union), `CascadeActionMethod`, per-action param interfaces (`CascadeActionMergeParams`, `CascadeActionAbandonParams`, `CascadeActionPauseParams`, `CascadeActionResumeParams`, `CascadeActionResolveParams`, `CascadeActionPushParams`, `CascadeActionCommitParams`), the `CascadeActionParams` union, the action-keyed `CascadeActionParamsMap`, and the method-keyed `CascadeActionMethodMap`.
+- **What stayed hub-side:** OpenHive's `src/map/cascade-actions.ts` also defines `sendCascadeAction(swarmId, action, params)` plus a `CascadeActionResult` return shape. Those are transport-coupled (they import `getInbound` from a hub-only connection registry and call `ws.send`) — only the pure schema (method names + per-action param interfaces) is upstreamed here.
+- **Subpath export:** `git-cascade/action-rpc` (in addition to the main barrel).
+
 Example:
 ```typescript
 const tracker = new MultiAgentRepoTracker({

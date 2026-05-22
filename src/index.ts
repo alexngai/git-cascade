@@ -65,5 +65,11 @@ export * as cascade from './cascade.js';
 // Event hooks (method names, payload types, emitter signature)
 export * from './events/index.js';
 
+// Diff RPC schema (cascade/diff.request / .response / .chunk)
+export * from './diff-rpc/index.js';
+
+// Action RPC schema (x-cascade/request.merge / .abandon / …)
+export * from './action-rpc/index.js';
+
 // Errors
 export * from './errors.js';

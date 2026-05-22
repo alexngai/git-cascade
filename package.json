@@ -16,6 +16,16 @@
       "types": "./dist/events/index.d.ts",
       "import": "./dist/events/index.js",
       "default": "./dist/events/index.js"
+    },
+    "./diff-rpc": {
+      "types": "./dist/diff-rpc/index.d.ts",
+      "import": "./dist/diff-rpc/index.js",
+      "default": "./dist/diff-rpc/index.js"
+    },
+    "./action-rpc": {
+      "types": "./dist/action-rpc/index.d.ts",
+      "import": "./dist/action-rpc/index.js",
+      "default": "./dist/action-rpc/index.js"
     }
   },
   "files": [
