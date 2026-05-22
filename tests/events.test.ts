@@ -25,6 +25,7 @@ import {
   type StreamAbandonedParams,
   type CascadeRebasedParams,
   type CascadeCompletedParams,
+  type CascadeCapability,
 } from '../src/index.js';
 import { createTestRepo, type TestRepo } from './setup.js';
 
@@ -680,5 +681,34 @@ describe('cascade event emission', () => {
         tracker.close();
       }
     });
+  });
+});
+
+describe('CascadeCapability', () => {
+  it('accepts an observe-only declaration (canAct/emitsConflicts false)', () => {
+    const observed: CascadeCapability = {
+      canServeDiff: true,
+      canAct: false,
+      emitsConflicts: false,
+    };
+    expect(observed.canServeDiff).toBe(true);
+    expect(observed.canAct).toBe(false);
+    expect(observed.emitsConflicts).toBe(false);
+  });
+
+  it('accepts a fully-driven declaration', () => {
+    const driven: CascadeCapability = {
+      canServeDiff: true,
+      canAct: true,
+      emitsConflicts: true,
+      autoCloseOnMerge: true,
+    };
+    expect(driven.canAct).toBe(true);
+    expect(driven.autoCloseOnMerge).toBe(true);
+  });
+
+  it('permits an empty block — every flag is optional', () => {
+    const empty: CascadeCapability = {};
+    expect(Object.keys(empty)).toHaveLength(0);
   });
 });

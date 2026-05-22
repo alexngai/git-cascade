@@ -86,7 +86,7 @@ src/
 - **MAP-compatible by design:** Default method names use the MAP vendor-extension convention (`x-cascade/stream.opened`, `x-cascade/stream.committed`, `x-cascade/stream.merged`, `x-cascade/stream.conflicted`, `x-cascade/stream.abandoned`). Runtimes embedding cascade alongside a MAP connection forward emitted events verbatim as MAP notifications — no translation needed.
 - **Configurable prefix:** `TrackerOptions.eventPrefix` (default `x-cascade`). Only the prefix varies; suffixes are fixed. Consumers narrowing on event type should match on the suffix (see `matchCascadeSuffix`).
 - **Fire-and-forget:** Emits fire synchronously after the corresponding DB write, before the tracker method returns. Exceptions in the callback are caught and discarded. No emitter = no runtime cost beyond a single null check.
-- **Key exports:** `CASCADE_METHODS` (default-prefixed names), `CASCADE_METHOD_SUFFIXES` (canonical suffixes), `buildCascadeMethods(prefix)`, `matchCascadeSuffix(method)`, `CascadeEmitter`, payload types (`StreamOpenedParams`, etc.).
+- **Key exports:** `CASCADE_METHODS` (default-prefixed names), `CASCADE_METHOD_SUFFIXES` (canonical suffixes), `buildCascadeMethods(prefix)`, `matchCascadeSuffix(method)`, `CascadeEmitter`, payload types (`StreamOpenedParams`, etc.), and `CascadeCapability` — the `cascade` capability-block schema a participant advertises to a coordination hub (`canServeDiff` / `canAct` / `emitsConflicts` / `autoCloseOnMerge`).
 
 Example:
 ```typescript

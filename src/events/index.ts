@@ -561,3 +561,69 @@ export interface CascadeMethodMap {
  * work in the callback will slow cascade operations.
  */
 export type CascadeEmitter = (method: string, params: unknown) => void;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Capability advertisement
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The `cascade` capability block — what a participant advertises about its
+ * git-cascade integration when it registers with a coordination hub.
+ *
+ * ## Why this lives in git-cascade
+ *
+ * git-cascade owns the `x-cascade/*` protocol schema (the event methods and
+ * payload types above). This capability block is the companion declaration —
+ * "which parts of that protocol does this participant actually support" — so
+ * it belongs alongside the schema it describes. Like every type in this
+ * module it is passive: a plain interface, no transport dependency, no
+ * runtime code. Exporting it does not make git-cascade transport-aware.
+ *
+ * ## How it is carried
+ *
+ * `cascade` is a **vendor extension** to the MAP `ParticipantCapabilities`
+ * object — core MAP does not define it, the same way the `x-` event prefix
+ * marks the events as a third-party extension. A participant places this
+ * block under the `cascade` key of the capabilities it sends at registration;
+ * a hub reads it back to gate behaviour and UI affordances.
+ *
+ * ## Honest declaration
+ *
+ * Each flag must reflect what the integration *actually wired up*, not what
+ * git-cascade can do in principle. An observe-only integration that watches
+ * git state and emits events — but never drives cascade operations — declares
+ * `canAct: false` and `emitsConflicts: false`. Declaring a capability the
+ * participant cannot honour just yields hub-side timeouts or dead UI.
+ */
+export interface CascadeCapability {
+  /**
+   * Can serve on-demand unified diffs: answers a `cascade/diff.request` with
+   * a `cascade/diff.response` (inline or chunked). A hub gates diff fetching
+   * on this — requesting from a participant that cannot serve only produces a
+   * timeout.
+   */
+  canServeDiff?: boolean;
+  /**
+   * Can receive and act on cascade *action* requests — merge, pause, resume,
+   * abandon, resolve-conflict. A participant that only *observes* git state
+   * (emitting `x-cascade/*` events without driving cascade operations)
+   * declares `false`; a hub should then render those actions as unavailable
+   * rather than issue requests nothing will answer.
+   */
+  canAct?: boolean;
+  /**
+   * Emits conflict lifecycle events (`stream.conflicted` /
+   * `stream.conflict_resolved`). Integrations that observe only completed git
+   * ref states — and so never witness an in-progress conflict — declare
+   * `false`; a hub can then dim conflict surfaces for this participant
+   * instead of showing a perpetually-empty conflict view.
+   */
+  emitsConflicts?: boolean;
+  /**
+   * Opts this participant's streams into hub-driven task auto-close: when a
+   * stream bound to a task merges, the hub transitions the linked task to
+   * completed. Off unless explicitly opted in by the participant or hub
+   * policy.
+   */
+  autoCloseOnMerge?: boolean;
+}
