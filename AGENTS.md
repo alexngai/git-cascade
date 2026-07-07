@@ -1,52 +1,58 @@
-# CLAUDE.md - git-cascade Codebase Guide
+# AGENTS.md - git-cascade Codebase Guide
 
 ## What is git-cascade?
 
-A coordination layer for multiple AI agents working concurrently on a shared git repository. It provides database-backed tracking of streams (branches), operations (audit trail), and changes (stable identity across rebases).
+A coordination layer for multiple AI agents working concurrently on a shared git repository. It provides database-backed (SQLite) tracking of streams (branches), operations (audit trail), and changes (stable identity across rebases), plus cascade rebase, deferred conflict handling, agent-isolated worktrees, and optional stacked review.
 
 ## Quick Start
 
 ```typescript
-import { MultiAgentRepoTracker } from './src/index.js';
+import { MultiAgentRepoTracker } from 'git-cascade';
 
 const tracker = new MultiAgentRepoTracker({ repoPath: '/path/to/repo' });
-const stream = tracker.createStream({ name: 'feature', agentId: 'agent-1' });
-tracker.commitChanges({ streamId: stream, message: 'feat: add X', agentId: 'agent-1', worktree: wt });
+
+const streamId = tracker.createStream({ name: 'feature', agentId: 'agent-1' });
+
+const worktree = '/path/to/repo/.worktrees/agent-1';
+tracker.createWorktree({ agentId: 'agent-1', path: worktree, branch: `stream/${streamId}` });
+
+tracker.commitChanges({ streamId, agentId: 'agent-1', worktree, message: 'feat: add X' });
+
 tracker.close();
 ```
+
+See `README.md` for the full walkthrough (fork/sync/merge) and `docs/OVERVIEW.md` for architecture detail.
 
 ## Project Structure
 
 ```
 src/
-├── index.ts          # Main exports
-├── tracker.ts        # MultiAgentRepoTracker class (start here)
-├── streams.ts        # Stream CRUD and lifecycle
-├── operations.ts     # Operation logging (audit trail)
-├── changes.ts        # Change identity tracking
-├── conflicts.ts      # Conflict record management
-├── cascade.ts        # Cascade rebase logic
-├── stacks.ts         # Review blocks (stacked review)
-├── dependencies.ts   # Stream dependency tracking
-├── rollback.ts       # Rollback operations
-├── worktrees.ts      # Agent worktree management
-├── guards.ts         # Optimistic concurrency
-├── snapshots.ts      # Working copy snapshots
-├── gc.ts             # Garbage collection & archiving
-├── recovery.ts       # Crash recovery
-├── errors.ts         # Custom error types
-├── db/
-│   ├── database.ts   # SQLite schema & initialization
-│   └── tables.ts     # Table name utilities
-├── models/
-│   ├── stream.ts     # Stream interfaces
-│   ├── operation.ts  # Operation types
-│   ├── change.ts     # Change identity models
-│   ├── conflict.ts   # Conflict types
-│   ├── stack.ts      # Review block models
-│   └── ...
-└── git/
-    └── commands.ts   # Git command wrappers
+├── index.ts        # Main barrel export
+├── tracker.ts      # MultiAgentRepoTracker class - start here
+├── streams.ts      # Stream CRUD, fork/merge/rebase, conflict clearing
+├── operations.ts   # Operation logging (audit trail)
+├── changes.ts      # Change identity tracking across rebases
+├── conflicts.ts    # Conflict record management
+├── cascade.ts      # Cascade rebase propagation
+├── stacks.ts       # Review blocks (stacked review)
+├── dependencies.ts # Stream dependency tracking
+├── rollback.ts     # Rollback operations
+├── worktrees.ts    # Agent worktree management
+├── guards.ts       # Optimistic concurrency
+├── snapshots.ts    # Working copy snapshots
+├── gc.ts           # Garbage collection & archiving
+├── recovery.ts     # Crash recovery, checkpoints, health check
+├── merge-queue.ts  # Merge queue coordination
+├── worker-tasks.ts # Higher-level task lifecycle on top of streams
+├── diff-stacks.ts  # Checkpoint-based diff stacks / cherry-pick
+├── reconcile.ts    # DB/git reconciliation
+├── errors.ts       # Custom error types
+├── db/             # SQLite schema, migrations, table naming
+├── models/         # TS interfaces/types per domain concept
+├── git/            # Git command wrappers
+├── events/         # Event schema (emit hook)
+├── diff-rpc/       # Hub<->sidecar diff-fetch schema
+└── action-rpc/     # Hub->sidecar action-request schema
 ```
 
 ## Core Concepts
@@ -54,7 +60,7 @@ src/
 ### Streams (`src/streams.ts`)
 - **What:** Logical work units, 1:1 with git branches (`stream/<id>`)
 - **Status:** `active` | `paused` | `merged` | `abandoned` | `conflicted`
-- **Key functions:** `createStream`, `forkStream`, `mergeStream`, `syncWithParent`, `rebaseOntoStream`
+- **Key functions:** `createStream`, `forkStream`, `mergeStream`, `syncWithParent`, `rebaseOntoStream`, `clearConflict`
 
 ### Operations (`src/operations.ts`)
 - **What:** Audit trail of all mutations for rollback capability
@@ -64,7 +70,7 @@ src/
 ### Changes (`src/changes.ts`)
 - **What:** Stable identity that survives git rebases via `Change-Id` trailers
 - **Status:** `active` | `squashed` | `dropped` | `merged`
-- **Key functions:** `createChange`, `getChangeByCommit`, `recordSquash`, `recordSplit`
+- **Key functions:** `createChange`, `getChangeByCommit`, `getChangeByHistoricalCommit`, `recordSquash`, `recordSplit`
 
 ### Conflicts (`src/conflicts.ts`)
 - **What:** Deferred conflict tracking - conflicts don't block the system
@@ -89,18 +95,17 @@ src/
 - **Key exports:** `CASCADE_METHODS` (default-prefixed names), `CASCADE_METHOD_SUFFIXES` (canonical suffixes), `buildCascadeMethods(prefix)`, `matchCascadeSuffix(method)`, `CascadeEmitter`, payload types (`StreamOpenedParams`, etc.), and `CascadeCapability` — the `cascade` capability-block schema a participant advertises to a coordination hub (`canServeDiff` / `canAct` / `emitsConflicts` / `autoCloseOnMerge`).
 
 ### Diff RPC schema (`src/diff-rpc/index.ts`)
-- **What:** Hub ↔ sidecar on-demand unified diff fetch — passive types + method-name constants. No runtime, no transport. Same schema-namespace rationale as the events module: hubs and sidecars share these shapes so the source-of-truth must be the published package.
-- **Wire methods:** `cascade/diff.request` (hub → sidecar), `cascade/diff.response` (sidecar → hub, inline or streaming announcement), `cascade/diff.chunk` (sidecar → hub, post-streaming follow-ups).
-- **Key exports:** `CASCADE_DIFF_METHODS`, `CASCADE_DIFF_METHOD_SET`, `CascadeDiffMethod`, tuning constants (`DIFF_INLINE_THRESHOLD_BYTES`, `DIFF_CHUNK_SIZE_BYTES`, `DIFF_REQUEST_TIMEOUT_MS`, `DIFF_MAX_RAW_BYTES`), payload types (`CascadeDiffRequestParams`, `CascadeDiffInlineResponse`, `CascadeDiffStreamingResponse`, `CascadeDiffErrorResponse`, `CascadeDiffResponseParams`, `CascadeDiffChunkParams`), method-keyed type map (`CascadeDiffMethodMap`), type guards (`isInlineResponse`, `isStreamingResponse`, `isErrorResponse`), and the hub-side resolver helper shapes (`DiffPayload`, `DiffErrorCode`, `DiffError`, `DiffResult`).
-- **Subpath export:** `git-cascade/diff-rpc` (in addition to the main barrel).
+- **What:** Hub <-> sidecar on-demand unified diff fetch — passive types + method-name constants. No runtime, no transport.
+- **Wire methods:** `cascade/diff.request` (hub -> sidecar), `cascade/diff.response` (sidecar -> hub, inline or streaming announcement), `cascade/diff.chunk` (sidecar -> hub, post-streaming follow-ups).
+- **Key exports:** `CASCADE_DIFF_METHODS`, `CASCADE_DIFF_METHOD_SET`, `CascadeDiffMethod`, tuning constants (`DIFF_INLINE_THRESHOLD_BYTES`, `DIFF_CHUNK_SIZE_BYTES`, `DIFF_REQUEST_TIMEOUT_MS`, `DIFF_MAX_RAW_BYTES`), payload types (`CascadeDiffRequestParams`, `CascadeDiffInlineResponse`, `CascadeDiffStreamingResponse`, `CascadeDiffErrorResponse`, `CascadeDiffResponseParams`, `CascadeDiffChunkParams`), method-keyed type map (`CascadeDiffMethodMap`), type guards (`isInlineResponse`, `isStreamingResponse`, `isErrorResponse`).
+- **Subpath export:** `git-cascade/diff-rpc`.
 
 ### Action RPC schema (`src/action-rpc/index.ts`)
-- **What:** Hub → sidecar command channel for cascade operations — passive types + method-name constants. The complement to the `x-cascade/stream.*` event vocabulary: events flow runtime → hub ("here is what happened"), action requests flow hub → runtime ("please do this"). Fire-and-forget; the resulting `x-cascade/stream.*` event provides observability.
+- **What:** Hub -> sidecar command channel for cascade operations — passive types + method-name constants. The complement to the `x-cascade/stream.*` event vocabulary: events flow runtime -> hub, action requests flow hub -> runtime. Fire-and-forget; the resulting event provides observability.
 - **Wire methods:** `x-cascade/request.merge`, `x-cascade/request.abandon`, `x-cascade/request.pause`, `x-cascade/request.resume`, `x-cascade/request.resolve`, `x-cascade/request.push`, `x-cascade/request.commit`.
-- **Capability gating:** A hub should only send these when the sidecar declares `cascade.canAct: true` on its `CascadeCapability` block (see events module). Sending to a `canAct: false` participant silently no-ops.
-- **Key exports:** `CASCADE_ACTION_METHODS` (action-keyed record), `CASCADE_ACTION_METHOD_SET`, `CascadeAction` (action-name union), `CascadeActionMethod`, per-action param interfaces (`CascadeActionMergeParams`, `CascadeActionAbandonParams`, `CascadeActionPauseParams`, `CascadeActionResumeParams`, `CascadeActionResolveParams`, `CascadeActionPushParams`, `CascadeActionCommitParams`), the `CascadeActionParams` union, the action-keyed `CascadeActionParamsMap`, and the method-keyed `CascadeActionMethodMap`.
-- **What stayed hub-side:** OpenHive's `src/map/cascade-actions.ts` also defines `sendCascadeAction(swarmId, action, params)` plus a `CascadeActionResult` return shape. Those are transport-coupled (they import `getInbound` from a hub-only connection registry and call `ws.send`) — only the pure schema (method names + per-action param interfaces) is upstreamed here.
-- **Subpath export:** `git-cascade/action-rpc` (in addition to the main barrel).
+- **Capability gating:** A hub should only send these when the sidecar declares `cascade.canAct: true` on its `CascadeCapability` block. Sending to a `canAct: false` participant silently no-ops.
+- **Key exports:** `CASCADE_ACTION_METHODS`, `CASCADE_ACTION_METHOD_SET`, `CascadeAction`, `CascadeActionMethod`, per-action param interfaces (`CascadeActionMergeParams`, etc.), `CascadeActionParams` union, `CascadeActionParamsMap`, `CascadeActionMethodMap`.
+- **Subpath export:** `git-cascade/action-rpc`.
 
 Example:
 ```typescript
@@ -208,21 +213,23 @@ Key errors to catch:
 ## Testing
 
 ```bash
-npm test                           # Run all 447 tests
-npm test -- tests/e2e              # Run e2e tests only
-npm test -- -t "stream"            # Run tests matching pattern
+npm test                           # Run tests (watch mode via vitest)
+npm run test:run                   # Run all tests once
+npm run test:e2e                   # Run e2e tests only (RUN_SLOW_TESTS=true)
+npx vitest run -t "stream"         # Run tests matching pattern
 ```
 
-Test files mirror source structure:
-- `tests/streams.test.ts` → `src/streams.ts`
-- `tests/e2e/*.test.ts` → Integration scenarios
+Test files mirror source structure: `tests/streams.test.ts` -> `src/streams.ts`, `tests/e2e/*.test.ts` -> integration scenarios.
 
 ## Build & Development
 
 ```bash
-npm run build      # Compile TypeScript
+npm run build      # Compile TypeScript (tsc)
 npm run typecheck  # Type check without emit
-npm test           # Run tests
+npm run lint       # ESLint on src
+npm run format     # Prettier on src + tests
+npm test           # Run tests (vitest, watch mode)
+npm run test:run   # Run tests once (CI-style)
 ```
 
 ## Key Files to Read First
@@ -232,7 +239,7 @@ npm test           # Run tests
 3. **`src/models/stream.ts`** - Key interfaces
 4. **`src/db/database.ts`** - Schema definition
 5. **`src/events/index.ts`** - Event schema + MAP-compatibility docs
-6. **`docs/OVERVIEW.md`** - Detailed documentation
+6. **`docs/OVERVIEW.md`** - Detailed architecture documentation
 
 ## Architecture Notes
 
@@ -241,20 +248,3 @@ npm test           # Run tests
 - **Deferred conflicts:** Conflicts recorded, don't stop system operation
 - **Stable identity:** Change-Ids in commit trailers survive rebases
 - **Agent isolation:** Each agent gets dedicated git worktree
-
-<!-- SWARMKIT-WIKI:START -->
-## SwarmKit Ecosystem Knowledge Base
-
-This repository participates in the SwarmKit ecosystem. Before changing architecture, package boundaries, cross-repo integrations, protocols, task/dispatch behavior, memory/learning flows, workspace/git behavior, or agent orchestration semantics, query the shared knowledge base:
-
-```sh
-node /Users/alexngai/GitHub/swarmkit-wiki/scripts/query-knowledge.mjs context --cwd "$PWD"
-node /Users/alexngai/GitHub/swarmkit-wiki/scripts/query-knowledge.mjs repo git-cascade
-node /Users/alexngai/GitHub/swarmkit-wiki/scripts/query-knowledge.mjs interactions git-cascade
-node /Users/alexngai/GitHub/swarmkit-wiki/scripts/query-knowledge.mjs search "<concept>"
-```
-
-Canonical ecosystem memory lives at `/Users/alexngai/GitHub/swarmkit-wiki`.
-
-When this repo changes knowledge that should persist across agents, update the relevant wiki article, semantic model, raw snapshot, graph artifact, or cross-repo interaction data in `swarmkit-wiki`. Do not treat this repo's local `.understand-anything/` cache as canonical; graph artifacts are centralized in `swarmkit-wiki/.understand-anything/graphs/`.
-<!-- SWARMKIT-WIKI:END -->
